@@ -1,0 +1,1142 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ==========================================================
+// ENUMS
+// ==========================================================
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum RoleCode {
+  ADMIN
+  MANAGER
+  CASHIER
+  WAITER
+  KITCHEN
+  BAR
+}
+
+enum TableStatus {
+  AVAILABLE
+  OCCUPIED
+  DISABLED
+}
+
+enum OrderType {
+  DINE_IN
+  TAKEAWAY
+  DELIVERY
+}
+
+enum OrderStatus {
+  DRAFT
+  SENT
+  IN_PROGRESS
+  READY
+  SERVED
+  PAID
+  CANCELLED
+}
+
+enum OrderItemStatus {
+  DRAFT
+  PENDING
+  PREPARING
+  READY
+  SERVED
+  CANCELLED
+}
+
+enum ProductionAreaCode {
+  KITCHEN
+  BAR
+  NONE
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentMethodCode {
+  CASH
+  YAPE
+  PLIN
+  CARD
+  BANK_TRANSFER
+  OTHER
+}
+
+enum CashSessionStatus {
+  OPEN
+  CLOSED
+}
+
+enum CashMovementType {
+  OPENING
+  SALE
+  INCOME
+  EXPENSE
+  WITHDRAWAL
+  ADJUSTMENT
+}
+
+enum PrinterConnectionType {
+  NETWORK_TCP
+  SYSTEM_PRINTER
+  USB
+}
+
+enum PrinterStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum PrinterPurpose {
+  KITCHEN
+  BAR
+  CASHIER
+  GENERAL
+}
+
+enum PrintJobType {
+  KITCHEN_COMMAND
+  BAR_COMMAND
+  CUSTOMER_TICKET
+  CASH_REPORT
+  TEST
+}
+
+enum PrintJobStatus {
+  PENDING
+  PROCESSING
+  PRINTED
+  FAILED
+  CANCELLED
+}
+
+enum ModifierSelectionType {
+  SINGLE
+  MULTIPLE
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  CANCEL
+  LOGIN
+  LOGOUT
+  PAYMENT
+  PRINT
+  OPEN_CASH
+  CLOSE_CASH
+}
+
+enum FileType {
+  PRODUCT_IMAGE
+  CATEGORY_IMAGE
+  LOGO
+  OTHER
+}
+
+// ==========================================================
+// CONFIGURACIÓN DEL NEGOCIO
+// ==========================================================
+
+model Business {
+  id String @id @default(uuid()) @db.Uuid
+
+  name        String
+  tradeName   String?
+  description String?
+
+  documentNumber String?
+  phone          String?
+  email          String?
+  address        String?
+
+  currencyCode String @default("PEN")
+
+  logoFileId String? @unique @db.Uuid
+  logoFile   File?   @relation("BusinessLogo", fields: [logoFileId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  diningAreas     DiningArea[]
+  productionAreas ProductionArea[]
+  users           User[]
+  categories      Category[]
+  products        Product[]
+  orders          Order[]
+  paymentMethods  PaymentMethod[]
+  cashRegisters   CashRegister[]
+  printers        Printer[]
+  printerAgents   PrinterAgent[]
+  auditLogs       AuditLog[]
+
+  @@map("businesses")
+}
+
+// ==========================================================
+// USUARIOS Y ROLES
+// ==========================================================
+
+model User {
+  id String @id @default(uuid()) @db.Uuid
+
+  businessId String   @db.Uuid
+  business   Business @relation(fields: [businessId], references: [id])
+
+  username String
+  password String
+
+  firstName String?
+  lastName  String?
+
+  role   RoleCode
+  status UserStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  createdOrders Order[] @relation("OrderCreatedBy")
+  closedOrders  Order[] @relation("OrderClosedBy")
+
+  orderItemsCreated   OrderItem[] @relation("OrderItemCreatedBy")
+  orderItemsCancelled OrderItem[] @relation("OrderItemCancelledBy")
+
+  payments Payment[]
+
+  openedCashSessions CashRegisterSession[] @relation("CashOpenedBy")
+  closedCashSessions CashRegisterSession[] @relation("CashClosedBy")
+
+  cashMovements CashMovement[]
+
+  auditLogs AuditLog[]
+
+  @@unique([businessId, username])
+  @@index([businessId, role])
+  @@map("users")
+}
+
+// ==========================================================
+// ARCHIVOS / MINIO
+// ==========================================================
+
+model File {
+  id String @id @default(uuid()) @db.Uuid
+
+  type FileType
+
+  originalName String
+  objectKey    String @unique
+  bucket       String
+
+  mimeType String?
+  size     Int?
+
+  createdAt DateTime @default(now())
+
+  productImages  ProductImage[]
+  categoryImages CategoryImage[]
+  businessLogo   Business?       @relation("BusinessLogo")
+
+  @@map("files")
+}
+
+// ==========================================================
+// ÁREAS DEL LOCAL Y MESAS
+// ==========================================================
+
+model DiningArea {
+  id String @id @default(uuid()) @db.Uuid
+
+  businessId String   @db.Uuid
+  business   Business @relation(fields: [businessId], references: [id])
+
+  name        String
+  description String?
+
+  sortOrder Int     @default(0)
+  active    Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tables Table[]
+
+  @@unique([businessId, name])
+  @@index([businessId, active])
+  @@map("dining_areas")
+}
+
+model Table {
+  id String @id @default(uuid()) @db.Uuid
+
+  diningAreaId String     @db.Uuid
+  diningArea   DiningArea @relation(fields: [diningAreaId], references: [id])
+
+  number Int
+  name   String?
+
+  capacity Int?
+
+  status TableStatus @default(AVAILABLE)
+  active Boolean     @default(true)
+
+  sortOrder Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orderTables OrderTable[]
+
+  @@unique([diningAreaId, number])
+  @@index([diningAreaId, status])
+  @@map("tables")
+}
+
+// ==========================================================
+// ÁREAS DE PRODUCCIÓN
+// ==========================================================
+
+model ProductionArea {
+  id String @id @default(uuid()) @db.Uuid
+
+  businessId String   @db.Uuid
+  business   Business @relation(fields: [businessId], references: [id])
+
+  name String
+  code ProductionAreaCode
+
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  categories Category[]
+  products   Product[]
+
+  printers Printer[]
+
+  @@unique([businessId, name])
+  @@index([businessId, code])
+  @@map("production_areas")
+}
+
+// ==========================================================
+// CATEGORÍAS
+// ==========================================================
+
+model Category {
+  id String @id @default(uuid()) @db.Uuid
+
+  businessId String   @db.Uuid
+  business   Business @relation(fields: [businessId], references: [id])
+
+  name        String
+  description String?
+
+  productionAreaId String?         @db.Uuid
+  productionArea   ProductionArea? @relation(fields: [productionAreaId], references: [id])
+
+  active    Boolean @default(true)
+  sortOrder Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products Product[]
+  images   CategoryImage[]
+
+  @@unique([businessId, name])
+  @@index([businessId, active])
+  @@map("categories")
+}
+
+model CategoryImage {
+  id String @id @default(uuid()) @db.Uuid
+
+  categoryId String   @db.Uuid
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  fileId String @db.Uuid
+  file   File   @relation(fields: [fileId], references: [id])
+
+  sortOrder Int @default(0)
+
+  @@unique([categoryId, fileId])
+  @@map("category_images")
+}
+
+// ==========================================================
+// PRODUCTOS
+// ==========================================================
+
+model Product {
+  id String @id @default(uuid()) @db.Uuid
+
+  businessId String   @db.Uuid
+  business   Business @relation(fields: [businessId], references: [id])
+
+  categoryId String   @db.Uuid
+  category   Category @relation(fields: [categoryId], references: [id])
+
+  productionAreaId String?         @db.Uuid
+  productionArea   ProductionArea? @relation(fields: [productionAreaId], references: [id])
+
+  name        String
+  description String?
+
+  basePrice Decimal @db.Decimal(10, 2)
+
+  active    Boolean @default(true)
+  available Boolean @default(true)
+
+  featured Boolean @default(false)
+
+  sortOrder Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  images ProductImage[]
+
+  variants ProductVariant[]
+
+  modifierGroups ProductModifierGroup[]
+
+  comboGroups ComboGroup[]
+
+  orderItems OrderItem[]
+
+  @@index([businessId, categoryId])
+  @@index([businessId, active, available])
+  @@map("products")
+}
+
+model ProductImage {
+  id String @id @default(uuid()) @db.Uuid
+
+  productId String  @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  fileId String @db.Uuid
+  file   File   @relation(fields: [fileId], references: [id])
+
+  isPrimary Boolean @default(false)
+  sortOrder Int     @default(0)
+
+  @@unique([productId, fileId])
+  @@map("product_images")
+}
+
+// ==========================================================
+// VARIANTES
+//
+// Ejemplo:
+// Broaster 1/8
+// Broaster 1/4
+// Familiar 8 piezas
+// ==========================================================
+
+model ProductVariant {
+  id String @id @default(uuid()) @db.Uuid
+
+  productId String  @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  name String
+
+  price Decimal @db.Decimal(10, 2)
+
+  active    Boolean @default(true)
+  available Boolean @default(true)
+
+  sortOrder Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orderItems OrderItem[]
+
+  @@unique([productId, name])
+  @@index([productId, active, available])
+  @@map("product_variants")
+}
+
+// ==========================================================
+// MODIFICADORES / ADICIONALES
+//
+// Ejemplos:
+//
+// "Elige 2 sabores"
+// - BBQ
+// - Maracuyá
+// - Teriyaki
+//
+// "Adicionales"
+// - Chorizo +4
+// - Salchicha +3
+//
+// ==========================================================
+
+model ModifierGroup {
+  id String @id @default(uuid()) @db.Uuid
+
+  name        String
+  description String?
+
+  selectionType ModifierSelectionType @default(MULTIPLE)
+
+  minSelections Int  @default(0)
+  maxSelections Int?
+
+  required Boolean @default(false)
+  active   Boolean @default(true)
+
+  sortOrder Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  options ModifierOption[]
+
+  products ProductModifierGroup[]
+
+  @@map("modifier_groups")
+}
+
+model ModifierOption {
+  id String @id @default(uuid()) @db.Uuid
+
+  modifierGroupId String        @db.Uuid
+  modifierGroup   ModifierGroup @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+
+  name String
+
+  priceDelta Decimal @default(0) @db.Decimal(10, 2)
+
+  active    Boolean @default(true)
+  available Boolean @default(true)
+
+  sortOrder Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orderItemModifiers OrderItemModifier[]
+
+  @@unique([modifierGroupId, name])
+  @@index([modifierGroupId, active])
+  @@map("modifier_options")
+}
+
+model ProductModifierGroup {
+  productId String  @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  modifierGroupId String        @db.Uuid
+  modifierGroup   ModifierGroup @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+
+  sortOrder Int @default(0)
+
+  @@id([productId, modifierGroupId])
+  @@map("product_modifier_groups")
+}
+
+// ==========================================================
+// COMBOS
+//
+// El propio Product puede representar un combo.
+// Aquí definimos qué debe elegir el cliente dentro de él.
+//
+// Ejemplo:
+//
+// Combo:
+// Hamburguesa + gaseosa
+//
+// grupo:
+// elegir gaseosa
+//
+// opciones:
+// Coca Cola
+// Inca Kola
+// Sprite
+//
+// ==========================================================
+
+model ComboGroup {
+  id String @id @default(uuid()) @db.Uuid
+
+  comboProductId String  @db.Uuid
+  comboProduct   Product @relation(fields: [comboProductId], references: [id], onDelete: Cascade)
+
+  name String
+
+  minSelections Int @default(1)
+  maxSelections Int @default(1)
+
+  sortOrder Int @default(0)
+
+  items ComboGroupItem[]
+
+  @@map("combo_groups")
+}
+
+model ComboGroupItem {
+  id String @id @default(uuid()) @db.Uuid
+
+  comboGroupId String     @db.Uuid
+  comboGroup   ComboGroup @relation(fields: [comboGroupId], references: [id], onDelete: Cascade)
+
+  productId String @db.Uuid
+
+  productNameSnapshot String
+
+  additionalPrice Decimal @default(0) @db.Decimal(10, 2)
+
+  active Boolean @default(true)
+
+  sortOrder Int @default(0)
+
+  @@index([comboGroupId])
+  @@index([productId])
+  @@map("combo_group_items")
+}
+
+// ==========================================================
+// PEDIDOS
+// ==========================================================
+
+model Order {
+  id String @id @default(uuid()) @db.Uuid
+
+  businessId String   @db.Uuid
+  business   Business @relation(fields: [businessId], references: [id])
+
+  number Int
+
+  type   OrderType   @default(DINE_IN)
+  status OrderStatus @default(DRAFT)
+
+  customerName  String?
+  customerPhone String?
+
+  notes String?
+
+  subtotal Decimal @default(0) @db.Decimal(10, 2)
+  discount Decimal @default(0) @db.Decimal(10, 2)
+  total    Decimal @default(0) @db.Decimal(10, 2)
+
+  createdById String? @db.Uuid
+  createdBy   User?   @relation("OrderCreatedBy", fields: [createdById], references: [id])
+
+  closedById String? @db.Uuid
+  closedBy   User?   @relation("OrderClosedBy", fields: [closedById], references: [id])
+
+  openedAt DateTime  @default(now())
+  sentAt   DateTime?
+  closedAt DateTime?
+  paidAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tables OrderTable[]
+
+  items OrderItem[]
+
+  payments Payment[]
+
+  printJobs PrintJob[]
+
+  @@unique([businessId, number])
+  @@index([businessId, status])
+  @@index([businessId, openedAt])
+  @@index([createdById])
+  @@map("orders")
+}
+
+// ==========================================================
+// RELACIÓN PEDIDO ↔ MESAS
+//
+// Permite unir:
+// Mesa 4 + Mesa 5 + Mesa 6
+// ==========================================================
+
+model OrderTable {
+  orderId String @db.Uuid
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  tableId String @db.Uuid
+  table   Table  @relation(fields: [tableId], references: [id])
+
+  joinedAt DateTime @default(now())
+
+  @@id([orderId, tableId])
+  @@index([tableId])
+  @@map("order_tables")
+}
+
+// ==========================================================
+// ITEMS DE PEDIDO
+// ==========================================================
+
+model OrderItem {
+  id String @id @default(uuid()) @db.Uuid
+
+  orderId String @db.Uuid
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  productId String?  @db.Uuid
+  product   Product? @relation(fields: [productId], references: [id])
+
+  productVariantId String?         @db.Uuid
+  productVariant   ProductVariant? @relation(fields: [productVariantId], references: [id])
+
+  // Snapshot histórico
+  productNameSnapshot String
+  variantNameSnapshot String?
+
+  quantity Int
+
+  unitPrice Decimal @db.Decimal(10, 2)
+
+  modifiersPrice Decimal @default(0) @db.Decimal(10, 2)
+
+  subtotal Decimal @db.Decimal(10, 2)
+
+  notes String?
+
+  status OrderItemStatus @default(DRAFT)
+
+  productionArea ProductionAreaCode @default(NONE)
+
+  sentAt      DateTime?
+  preparingAt DateTime?
+  readyAt     DateTime?
+  servedAt    DateTime?
+  cancelledAt DateTime?
+
+  createdById String? @db.Uuid
+  createdBy   User?   @relation("OrderItemCreatedBy", fields: [createdById], references: [id])
+
+  cancelledById String? @db.Uuid
+  cancelledBy   User?   @relation("OrderItemCancelledBy", fields: [cancelledById], references: [id])
+
+  cancellationReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  modifiers OrderItemModifier[]
+
+  comboSelections OrderItemComboSelection[]
+
+  printJobItems PrintJobItem[]
+
+  @@index([orderId])
+  @@index([orderId, status])
+  @@index([productionArea, status])
+  @@map("order_items")
+}
+
+// ==========================================================
+// MODIFICADORES ELEGIDOS EN UN PEDIDO
+// ==========================================================
+
+model OrderItemModifier {
+  id String @id @default(uuid()) @db.Uuid
+
+  orderItemId String    @db.Uuid
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  modifierOptionId String?         @db.Uuid
+  modifierOption   ModifierOption? @relation(fields: [modifierOptionId], references: [id])
+
+  // Snapshot
+  groupNameSnapshot  String
+  optionNameSnapshot String
+
+  priceDelta Decimal @default(0) @db.Decimal(10, 2)
+
+  quantity Int @default(1)
+
+  createdAt DateTime @default(now())
+
+  @@index([orderItemId])
+  @@map("order_item_modifiers")
+}
+
+// ==========================================================
+// OPCIONES DE COMBO ELEGIDAS
+// ==========================================================
+
+model OrderItemComboSelection {
+  id String @id @default(uuid()) @db.Uuid
+
+  orderItemId String    @db.Uuid
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  comboGroupItemId String? @db.Uuid
+
+  groupNameSnapshot   String
+  productNameSnapshot String
+
+  additionalPrice Decimal @default(0) @db.Decimal(10, 2)
+
+  createdAt DateTime @default(now())
+
+  @@index([orderItemId])
+  @@map("order_item_combo_selections")
+}
+
+// ==========================================================
+// MÉTODOS DE PAGO
+//
+// Los hacemos configurables.
+// ==========================================================
+
+model PaymentMethod {
+  id String @id @default(uuid()) @db.Uuid
+
+  businessId String   @db.Uuid
+  business   Business @relation(fields: [businessId], references: [id])
+
+  code PaymentMethodCode
+  name String
+
+  active Boolean @default(true)
+
+  sortOrder Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  payments Payment[]
+
+  @@unique([businessId, code])
+  @@map("payment_methods")
+}
+
+// ==========================================================
+// PAGOS
+//
+// Permite pagos mixtos.
+//
+// Ejemplo:
+// cuenta S/100
+// efectivo S/40
+// yape S/30
+// tarjeta S/30
+// ==========================================================
+
+model Payment {
+  id String @id @default(uuid()) @db.Uuid
+
+  orderId String @db.Uuid
+  order   Order  @relation(fields: [orderId], references: [id])
+
+  paymentMethodId String        @db.Uuid
+  paymentMethod   PaymentMethod @relation(fields: [paymentMethodId], references: [id])
+
+  amount Decimal @db.Decimal(10, 2)
+
+  status PaymentStatus @default(COMPLETED)
+
+  reference String?
+  notes     String?
+
+  userId String? @db.Uuid
+  user   User?   @relation(fields: [userId], references: [id])
+
+  paidAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  cashMovement CashMovement?
+
+  @@index([orderId])
+  @@index([paymentMethodId])
+  @@index([paidAt])
+  @@map("payments")
+}
+
+// ==========================================================
+// CAJAS
+// ==========================================================
+
+model CashRegister {
+  id String @id @default(uuid()) @db.Uuid
+
+  businessId String   @db.Uuid
+  business   Business @relation(fields: [businessId], references: [id])
+
+  name String
+
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sessions CashRegisterSession[]
+
+  @@unique([businessId, name])
+  @@map("cash_registers")
+}
+
+model CashRegisterSession {
+  id String @id @default(uuid()) @db.Uuid
+
+  cashRegisterId String       @db.Uuid
+  cashRegister   CashRegister @relation(fields: [cashRegisterId], references: [id])
+
+  status CashSessionStatus @default(OPEN)
+
+  openingAmount Decimal @db.Decimal(10, 2)
+
+  expectedAmount Decimal? @db.Decimal(10, 2)
+  actualAmount   Decimal? @db.Decimal(10, 2)
+
+  difference Decimal? @db.Decimal(10, 2)
+
+  openedById String @db.Uuid
+  openedBy   User   @relation("CashOpenedBy", fields: [openedById], references: [id])
+
+  closedById String? @db.Uuid
+  closedBy   User?   @relation("CashClosedBy", fields: [closedById], references: [id])
+
+  openedAt DateTime  @default(now())
+  closedAt DateTime?
+
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  movements CashMovement[]
+
+  @@index([cashRegisterId, status])
+  @@index([openedAt])
+  @@map("cash_register_sessions")
+}
+
+// ==========================================================
+// MOVIMIENTOS DE CAJA
+// ==========================================================
+
+model CashMovement {
+  id String @id @default(uuid()) @db.Uuid
+
+  cashSessionId String              @db.Uuid
+  cashSession   CashRegisterSession @relation(fields: [cashSessionId], references: [id])
+
+  type CashMovementType
+
+  amount Decimal @db.Decimal(10, 2)
+
+  description String?
+
+  paymentId String?  @unique @db.Uuid
+  payment   Payment? @relation(fields: [paymentId], references: [id])
+
+  userId String? @db.Uuid
+  user   User?   @relation(fields: [userId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([cashSessionId, createdAt])
+  @@map("cash_movements")
+}
+
+// ==========================================================
+// IMPRESORAS
+// ==========================================================
+
+model Printer {
+  id String @id @default(uuid()) @db.Uuid
+
+  businessId String   @db.Uuid
+  business   Business @relation(fields: [businessId], references: [id])
+
+  name String
+
+  purpose PrinterPurpose
+
+  connectionType PrinterConnectionType
+
+  status PrinterStatus @default(ACTIVE)
+
+  // Red
+  host String?
+  port Int?    @default(9100)
+
+  // Windows/Linux system printer
+  systemName String?
+
+  // USB u otra identificación física
+  devicePath String?
+
+  paperWidth Int @default(80)
+
+  productionAreaId String?         @db.Uuid
+  productionArea   ProductionArea? @relation(fields: [productionAreaId], references: [id])
+
+  printerAgentId String?       @db.Uuid
+  printerAgent   PrinterAgent? @relation(fields: [printerAgentId], references: [id])
+
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  printJobs PrintJob[]
+
+  @@index([businessId, purpose])
+  @@index([printerAgentId])
+  @@map("printers")
+}
+
+// ==========================================================
+// AGENTE LOCAL GO
+//
+// Se instala en una PC del restaurante.
+// ==========================================================
+
+model PrinterAgent {
+  id String @id @default(uuid()) @db.Uuid
+
+  businessId String   @db.Uuid
+  business   Business @relation(fields: [businessId], references: [id])
+
+  name String
+
+  tokenHash String @unique
+
+  hostname  String?
+  ipAddress String?
+
+  version String?
+
+  active Boolean @default(true)
+  online Boolean @default(false)
+
+  lastSeenAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  printers Printer[]
+
+  @@index([businessId, active])
+  @@map("printer_agents")
+}
+
+// ==========================================================
+// TRABAJOS DE IMPRESIÓN
+// ==========================================================
+
+model PrintJob {
+  id String @id @default(uuid()) @db.Uuid
+
+  printerId String  @db.Uuid
+  printer   Printer @relation(fields: [printerId], references: [id])
+
+  orderId String? @db.Uuid
+  order   Order?  @relation(fields: [orderId], references: [id])
+
+  type PrintJobType
+
+  status PrintJobStatus @default(PENDING)
+
+  attempts Int @default(0)
+
+  // información lista para generar ESC/POS
+  payload Json
+
+  error String?
+
+  createdAt    DateTime  @default(now())
+  processingAt DateTime?
+  printedAt    DateTime?
+  failedAt     DateTime?
+
+  items PrintJobItem[]
+
+  @@index([printerId, status])
+  @@index([orderId])
+  @@index([status, createdAt])
+  @@map("print_jobs")
+}
+
+// ==========================================================
+// ITEMS INCLUIDOS EN UNA COMANDA
+//
+// Importante para no imprimir dos veces el mismo item
+// accidentalmente.
+// ==========================================================
+
+model PrintJobItem {
+  printJobId String   @db.Uuid
+  printJob   PrintJob @relation(fields: [printJobId], references: [id], onDelete: Cascade)
+
+  orderItemId String    @db.Uuid
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id])
+
+  @@id([printJobId, orderItemId])
+  @@map("print_job_items")
+}
+
+// ==========================================================
+// AUDITORÍA
+// ==========================================================
+
+model AuditLog {
+  id String @id @default(uuid()) @db.Uuid
+
+  businessId String   @db.Uuid
+  business   Business @relation(fields: [businessId], references: [id])
+
+  userId String? @db.Uuid
+  user   User?   @relation(fields: [userId], references: [id])
+
+  action AuditAction
+
+  entity      String
+  entityId    String?
+  description String?
+
+  oldData Json?
+  newData Json?
+
+  ipAddress String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+
+  @@index([businessId, createdAt])
+  @@index([entity, entityId])
+  @@index([userId])
+  @@map("audit_logs")
+}
