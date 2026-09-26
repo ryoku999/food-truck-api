@@ -1,6 +1,6 @@
 import { UserRole, UserStatus } from '@/generated/prisma/enums';
 
-export interface CreateUserResponse {
+export interface UserResponse {
   id: string;
   username: string;
   dni: string;
@@ -11,3 +11,19 @@ export interface CreateUserResponse {
   createdAt: Date;
   updatedAt: Date;
 }
+
+export interface PaginatedUsersResponse {
+  items: UserResponse[];
+  meta: {
+    page: number;
+    pageSize: number;
+    total: number;
+    pageCount: number;
+  };
+}
+
+export interface MessageResponse {
+  message: string;
+}
+
+export type CreateUserResponse = UserResponse;
