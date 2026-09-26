@@ -2,13 +2,17 @@ import { DatabaseService } from '@/database/database.service';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { LoginDto } from './dto/login.dto';
 import bcrypt from 'bcryptjs';
-import { RoleCode, UserStatus } from '@/generated/prisma/enums';
+import { UserRole, UserStatus } from '@/generated/prisma/enums';
 import {
   durationToMilliseconds,
   generateRefreshToken,
   hashRefreshToken,
 } from './utils/auth.utils';
-import { AuthTokens } from './interfaces/auth.interface';
+import {
+  AuthTokens,
+  AuthUserResponse,
+  LoginServiceResult,
+} from './interfaces/auth.interface';
 import { JwtPayload } from '@/shared/interfaces/jwt-payload.interface';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -27,8 +31,8 @@ export class AuthService {
     );
   }
 
-  async login(dto: LoginDto) {
-    const userFound = await this.db.user.findFirst({
+  async login(dto: LoginDto): Promise<LoginServiceResult> {
+    const userFound = await this.db.user.findUnique({
       where: { username: dto.username },
     });
 
@@ -51,7 +55,7 @@ export class AuthService {
 
     const tokens = await this.createTokensResponse(
       userFound.id,
-      userFound.role,
+      userFound.userRole,
     );
 
     const refreshExpiresAt = new Date(Date.now() + this.refreshExpiresInMs);
@@ -69,9 +73,10 @@ export class AuthService {
       user: {
         id: userFound.id,
         username: userFound.username,
+        dni: userFound.dni,
         firstName: userFound.firstName,
         lastName: userFound.lastName,
-        role: userFound.role,
+        userRole: userFound.userRole,
         status: userFound.status,
       },
     };
@@ -79,10 +84,10 @@ export class AuthService {
 
   private async createTokensResponse(
     userId: string,
-    role: RoleCode,
+    userRole: UserRole,
     refreshToken = generateRefreshToken(),
   ): Promise<AuthTokens> {
-    const payload: JwtPayload = { sub: userId, role };
+    const payload: JwtPayload = { sub: userId, userRole };
     const accessToken = await this.jwtService.signAsync(payload);
 
     return {
@@ -146,8 +151,29 @@ export class AuthService {
 
     return this.createTokensResponse(
       storedToken.userId,
-      storedToken.user.role,
+      storedToken.user.userRole,
       nextRefreshToken,
     );
+  }
+
+  async getAuthenticatedUser(userId: string): Promise<AuthUserResponse> {
+    const user = await this.db.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        username: true,
+        dni: true,
+        firstName: true,
+        lastName: true,
+        userRole: true,
+        status: true,
+      },
+    });
+
+    if (!user || user.status !== UserStatus.ACTIVE) {
+      throw new UnauthorizedException('La cuenta no esta activa');
+    }
+
+    return user;
   }
 }

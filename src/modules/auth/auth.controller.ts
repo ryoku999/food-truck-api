@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Post,
@@ -11,9 +12,12 @@ import {
 import { Throttle } from '@nestjs/throttler';
 import { type Request, type Response } from 'express';
 import { LoginDto } from './dto/login.dto';
-import { LoginRes } from './interfaces/auth.interface';
+import { LoginResponse } from './interfaces/auth.interface';
 import { AuthService } from './auth.service';
 import { AuthCookieService } from './services/auth-cookie.service';
+import { Auth } from '@/shared/decorators/auth.decorator';
+import { CurrentUser } from '@/shared/decorators/current-user.decorator';
+import type { AuthenticatedUser } from '@/shared/interfaces/authenticated-user.interface';
 
 @Controller('auth')
 export class AuthController {
@@ -28,7 +32,7 @@ export class AuthController {
   async webLogin(
     @Body() body: LoginDto,
     @Res({ passthrough: true }) response: Response,
-  ): Promise<LoginRes> {
+  ): Promise<LoginResponse> {
     const result = await this.authService.login(body);
     this.authCookieService.setCookies(response, result.tokens);
     return result.user;
@@ -58,11 +62,22 @@ export class AuthController {
       throw new UnauthorizedException('No se encontro el refresh token');
     }
 
-    const tokens = await this.authService.refresh(refreshToken);
-    this.authCookieService.setCookies(response, tokens);
+    try {
+      const tokens = await this.authService.refresh(refreshToken);
+      this.authCookieService.setCookies(response, tokens);
+    } catch (error: unknown) {
+      this.authCookieService.clearCookies(response);
+      throw error;
+    }
 
     return {
       message: 'Token refrescado',
     };
+  }
+
+  @Get('me')
+  @Auth()
+  async me(@CurrentUser() user: AuthenticatedUser): Promise<LoginResponse> {
+    return this.authService.getAuthenticatedUser(user.id);
   }
 }

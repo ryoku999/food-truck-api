@@ -1,4 +1,4 @@
-import { RoleCode, UserStatus } from '@/generated/prisma/enums';
+import { UserRole, UserStatus } from '@/generated/prisma/enums';
 
 export interface AuthTokens {
   accessToken: string;
@@ -7,40 +7,17 @@ export interface AuthTokens {
 
 export interface AuthUserResponse {
   id: string;
-  firstName: string;
+  username: string;
+  firstName: string | null;
   lastName: string | null;
   dni: string;
-  phone: string;
-  email: string | null;
-  emailVerifiedAt: Date | null;
-  role: RoleCode;
+  userRole: UserRole;
   status: UserStatus;
 }
 
-export interface LoginResponseI {
+export interface LoginServiceResult {
   tokens: AuthTokens;
   user: AuthUserResponse;
 }
 
-export interface LoginRes {
-  firstName: string | null;
-  id: string;
-  lastName: string | null;
-  role: string;
-  status: string;
-  username: string;
-}
-
-export interface RegisterResponse {
-  id: string;
-  firstName: string;
-  lastName: string | null;
-  phone: string;
-  dni: string;
-  email: string | null;
-  emailVerifiedAt: Date | null;
-  role: RoleCode;
-  status: UserStatus;
-  createdAt: Date;
-  updatedAt: Date;
-}
+export type LoginResponse = AuthUserResponse;

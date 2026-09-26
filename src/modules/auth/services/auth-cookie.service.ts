@@ -62,13 +62,21 @@ export class AuthCookieService {
   }
 
   getRefreshToken(req: Request) {
+    return this.getCookie(req, this.refreshCookieName);
+  }
+
+  getAccessToken(req: Request): string | null {
+    return this.getCookie(req, this.accessCookieName);
+  }
+
+  private getCookie(req: Request, cookieName: string): string | null {
     const cookies: unknown = req.cookies;
     if (!cookies || typeof cookies !== 'object') {
       return null;
     }
 
-    const refreshToken: unknown = req.cookies?.[this.refreshCookieName];
-    return typeof refreshToken === 'string' ? refreshToken : null;
+    const token: unknown = req.cookies?.[cookieName];
+    return typeof token === 'string' ? token : null;
   }
 
   private options(maxAge?: number): CookieOptions {

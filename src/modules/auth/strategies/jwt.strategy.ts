@@ -3,32 +3,22 @@ import { UserStatus } from '@/generated/prisma/enums';
 import { AuthenticatedUser } from '@/shared/interfaces/authenticated-user.interface';
 import { JwtPayload } from '@/shared/interfaces/jwt-payload.interface';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
-import { Request } from 'express';
 import { ExtractJwt, Strategy } from 'passport-jwt';
+import { ConfigService } from '@nestjs/config';
+import { AuthCookieService } from '../services/auth-cookie.service';
+import type { Request } from 'express';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   constructor(
     configService: ConfigService,
     private readonly db: DatabaseService,
+    authCookieService: AuthCookieService,
   ) {
-    const accessCookieName = configService.getOrThrow<string>(
-      'AUTH_ACCESS_COOKIE_NAME',
-    );
-
     super({
       jwtFromRequest: ExtractJwt.fromExtractors([
-        (request: Request): string | null => {
-          const cookies: unknown = request.cookies;
-          if (!cookies || typeof cookies !== 'object') {
-            return null;
-          }
-
-          const token: unknown = request.cookies?.[accessCookieName];
-          return typeof token === 'string' ? token : null;
-        },
+        (request: Request) => authCookieService.getAccessToken(request),
       ]),
       ignoreExpiration: false,
       secretOrKey: configService.getOrThrow<string>('JWT_SECRET'),
@@ -41,7 +31,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   async validate(payload: JwtPayload): Promise<AuthenticatedUser> {
     const user = await this.db.user.findUnique({
       where: { id: payload.sub },
-      select: { id: true, role: true, status: true },
+      select: { id: true, userRole: true, status: true },
     });
 
     if (!user || user.status !== UserStatus.ACTIVE) {
@@ -50,7 +40,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
 
     return {
       id: user.id,
-      role: user.role,
+      userRole: user.userRole,
     };
   }
 }

@@ -7,7 +7,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import { Request } from 'express';
 import { AuthenticatedUser } from '../interfaces/authenticated-user.interface';
-import { RoleCode } from '@/generated/prisma/enums';
+import { UserRole } from '@/generated/prisma/enums';
 import { ROLES_KEY } from '../constants/roles-key.constant';
 
 @Injectable()
@@ -15,7 +15,7 @@ export class RoleGuard implements CanActivate {
   constructor(private readonly reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
-    const requiredRoles = this.reflector.getAllAndOverride<RoleCode[]>(
+    const requiredRoles = this.reflector.getAllAndOverride<UserRole[]>(
       ROLES_KEY,
       [context.getHandler(), context.getClass()],
     );
@@ -33,7 +33,7 @@ export class RoleGuard implements CanActivate {
       throw new ForbiddenException('Usuario no autenticado');
     }
 
-    if (!requiredRoles.includes(user.role)) {
+    if (!requiredRoles.includes(user.userRole)) {
       throw new ForbiddenException('No tienes permisos para esta accion');
     }
 

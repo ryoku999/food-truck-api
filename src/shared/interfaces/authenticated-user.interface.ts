@@ -1,6 +1,6 @@
-import { RoleCode } from '@/generated/prisma/enums';
+import { UserRole } from '@/generated/prisma/enums';
 
 export interface AuthenticatedUser {
   id: string;
-  role: RoleCode;
+  userRole: UserRole;
 }

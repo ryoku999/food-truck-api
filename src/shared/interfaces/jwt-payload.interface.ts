@@ -1,8 +1,8 @@
-import { RoleCode } from '@/generated/prisma/enums';
+import { UserRole } from '@/generated/prisma/enums';
 
 export interface JwtPayload {
   sub: string;
-  role: RoleCode;
+  userRole: UserRole;
   iat?: number;
   exp?: number;
 }
