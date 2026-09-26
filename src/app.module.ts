@@ -9,6 +9,8 @@ import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { UsersModule } from './modules/users/users.module';
 import { ScheduleModule } from '@nestjs/schedule';
 import { APP_GUARD } from '@nestjs/core';
+import { BusinessModule } from './modules/business/business.module';
+import { FilesModule } from './modules/files/files.module';
 
 @Module({
   imports: [
@@ -30,6 +32,8 @@ import { APP_GUARD } from '@nestjs/core';
     ScheduleModule.forRoot(),
     AuthModule,
     UsersModule,
+    BusinessModule,
+    FilesModule,
   ],
   controllers: [AppController],
   providers: [
