@@ -231,11 +231,25 @@ model User {
 
   cashMovements CashMovement[]
 
-  auditLogs AuditLog[]
+  auditLogs     AuditLog[]
+  refreshTokens RefreshToken[]
 
   @@unique([businessId, username])
   @@index([businessId, role])
   @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  userId    String   @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique @db.VarChar(255)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
 }
 
 // ==========================================================
