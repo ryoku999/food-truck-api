@@ -11,6 +11,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { APP_GUARD } from '@nestjs/core';
 import { BusinessModule } from './modules/business/business.module';
 import { FilesModule } from './modules/files/files.module';
+import { ProductionAreasModule } from './modules/production-areas/production-areas.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { FilesModule } from './modules/files/files.module';
     UsersModule,
     BusinessModule,
     FilesModule,
+    ProductionAreasModule,
   ],
   controllers: [AppController],
   providers: [
