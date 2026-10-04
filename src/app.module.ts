@@ -12,6 +12,8 @@ import { APP_GUARD } from '@nestjs/core';
 import { BusinessModule } from './modules/business/business.module';
 import { FilesModule } from './modules/files/files.module';
 import { ProductionAreasModule } from './modules/production-areas/production-areas.module';
+import { DiningAreasModule } from './modules/dining-areas/dining-areas.module';
+import { TablesModule } from './modules/tables/tables.module';
 
 @Module({
   imports: [
@@ -36,6 +38,8 @@ import { ProductionAreasModule } from './modules/production-areas/production-are
     BusinessModule,
     FilesModule,
     ProductionAreasModule,
+    DiningAreasModule,
+    TablesModule,
   ],
   controllers: [AppController],
   providers: [
