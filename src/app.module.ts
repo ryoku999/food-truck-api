@@ -16,6 +16,7 @@ import { DiningAreasModule } from './modules/dining-areas/dining-areas.module';
 import { TablesModule } from './modules/tables/tables.module';
 import { CategoriesModule } from './modules/categories/categories.module';
 import { ModifiersModule } from './modules/modifiers/modifiers.module';
+import { ProductsModule } from './modules/products/products.module';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { ModifiersModule } from './modules/modifiers/modifiers.module';
     TablesModule,
     CategoriesModule,
     ModifiersModule,
+    ProductsModule,
   ],
   controllers: [AppController],
   providers: [
