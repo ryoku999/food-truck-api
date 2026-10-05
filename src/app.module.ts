@@ -18,6 +18,8 @@ import { CategoriesModule } from './modules/categories/categories.module';
 import { ModifiersModule } from './modules/modifiers/modifiers.module';
 import { ProductsModule } from './modules/products/products.module';
 import { PaymentMethodsModule } from './modules/payment-methods/payment-methods.module';
+import { OrdersModule } from './modules/orders/orders.module';
+import { ProductionQueueModule } from './modules/production-queue/production-queue.module';
 
 @Module({
   imports: [
@@ -48,6 +50,8 @@ import { PaymentMethodsModule } from './modules/payment-methods/payment-methods.
     ModifiersModule,
     ProductsModule,
     PaymentMethodsModule,
+    OrdersModule,
+    ProductionQueueModule,
   ],
   controllers: [AppController],
   providers: [
