@@ -17,6 +17,7 @@ import { TablesModule } from './modules/tables/tables.module';
 import { CategoriesModule } from './modules/categories/categories.module';
 import { ModifiersModule } from './modules/modifiers/modifiers.module';
 import { ProductsModule } from './modules/products/products.module';
+import { PaymentMethodsModule } from './modules/payment-methods/payment-methods.module';
 
 @Module({
   imports: [
@@ -46,6 +47,7 @@ import { ProductsModule } from './modules/products/products.module';
     CategoriesModule,
     ModifiersModule,
     ProductsModule,
+    PaymentMethodsModule,
   ],
   controllers: [AppController],
   providers: [
