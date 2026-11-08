@@ -1,4 +1,5 @@
 import { DatabaseService } from '@/database/database.service';
+import { ensureOrderUnbilled } from '@/modules/payments/ensure-order-unbilled';
 import { Prisma } from '@/generated/prisma/client';
 import {
   AuditAction,
@@ -204,6 +205,9 @@ export class ProductionQueueService {
           );
         }
         const now = new Date();
+        if (dto.status === OrderItemStatus.CANCELLED) {
+          await ensureOrderUnbilled(tx, item.orderId);
+        }
         await tx.orderItem.update({
           where: { id: item.id },
           data: {

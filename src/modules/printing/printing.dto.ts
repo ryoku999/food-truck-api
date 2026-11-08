@@ -52,6 +52,10 @@ export class TestPrinterDto {
 export class PrintTicketDto {
   @IsOptional() @IsUUID() printerId?: string;
 }
+
+export class PartTicketParamsDto extends IdDto {
+  @IsUUID() partId!: string;
+}
 export class PrintResultDto {
   @IsInt() @Min(1) attempt!: number;
   @IsIn(['PRINTED', 'FAILED']) status!: 'PRINTED' | 'FAILED';

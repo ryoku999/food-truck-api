@@ -120,6 +120,8 @@ enum PrintJobType {
   KITCHEN_COMMAND
   BAR_COMMAND
   CUSTOMER_TICKET
+  PAYMENT_RECEIPT
+  PART_TICKET
   CASH_REPORT
   TEST
 }
@@ -649,6 +651,7 @@ model Order {
   tables OrderTable[]
 
   items OrderItem[]
+  billParts BillPart[]
 
   payments Payment[]
 
@@ -738,6 +741,7 @@ model OrderItem {
   comboSelections OrderItemComboSelection[]
 
   printJobItems PrintJobItem[]
+  billPartItems BillPartItem[]
 
   @@index([orderId])
   @@index([orderId, status])
@@ -842,6 +846,8 @@ model Payment {
   paymentMethod   PaymentMethod @relation(fields: [paymentMethodId], references: [id])
 
   amount Decimal @db.Decimal(10, 2)
+  receivedAmount Decimal? @db.Decimal(10, 2)
+  changeAmount   Decimal? @db.Decimal(10, 2)
 
   status PaymentStatus @default(COMPLETED)
 
@@ -857,11 +863,45 @@ model Payment {
   updatedAt DateTime @updatedAt
 
   cashMovement CashMovement?
+  billPartId String? @db.Uuid
+  billPart BillPart? @relation(fields: [billPartId], references: [id], onDelete: Restrict)
+  pendingAfter Decimal? @db.Decimal(10, 2)
+  cashSessionId String?              @db.Uuid
+  cashSession   CashRegisterSession? @relation(fields: [cashSessionId], references: [id], onDelete: Restrict)
 
   @@index([orderId])
   @@index([paymentMethodId])
   @@index([paidAt])
+  @@index([cashSessionId])
+  @@index([billPartId])
   @@map("payments")
+}
+
+model BillPart {
+  id String @id @default(uuid()) @db.Uuid
+  orderId String @db.Uuid
+  order Order @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  name String
+  total Decimal @db.Decimal(10, 2)
+  createdAt DateTime @default(now())
+  items BillPartItem[]
+  payments Payment[]
+
+  @@index([orderId])
+  @@map("bill_parts")
+}
+
+model BillPartItem {
+  billPartId String @db.Uuid
+  billPart BillPart @relation(fields: [billPartId], references: [id], onDelete: Cascade)
+  orderItemId String @db.Uuid
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  quantity Int
+  amount Decimal @db.Decimal(10, 2)
+
+  @@id([billPartId, orderItemId])
+  @@index([orderItemId])
+  @@map("bill_part_items")
 }
 
 // ==========================================================
@@ -914,6 +954,7 @@ model CashRegisterSession {
   updatedAt DateTime @updatedAt
 
   movements CashMovement[]
+  payments  Payment[]
 
   @@index([cashRegisterId, status])
   @@index([openedAt])
@@ -1031,6 +1072,7 @@ model PrinterAgent {
 
 model PrintJob {
   id String @id @default(uuid()) @db.Uuid
+  documentKey String? @unique
 
   printerId String  @db.Uuid
   printer   Printer @relation(fields: [printerId], references: [id])

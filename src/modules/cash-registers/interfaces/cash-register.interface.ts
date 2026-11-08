@@ -1,4 +1,25 @@
-import { CashMovementType, CashSessionStatus } from '@/generated/prisma/enums';
+import {
+  CashMovementType,
+  CashSessionStatus,
+  PaymentMethodCode,
+} from '@/generated/prisma/enums';
+
+export interface CashCollectionsResponse {
+  total: string;
+  cash: string;
+  nonCash: string;
+  cancelled: string;
+  refunded: string;
+  methods: {
+    id: string;
+    code: PaymentMethodCode;
+    name: string;
+    amount: string;
+    count: number;
+    cancelled: string;
+    refunded: string;
+  }[];
+}
 
 export interface CashRegisterResponse {
   id: string;
@@ -43,5 +64,6 @@ export interface CashSessionResponse {
   createdAt: Date;
   updatedAt: Date;
   summary: Record<CashMovementType, string>;
+  collections: CashCollectionsResponse;
   movements: CashMovementResponse[];
 }

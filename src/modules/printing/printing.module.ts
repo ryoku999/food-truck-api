@@ -22,6 +22,7 @@ import {
   PrinterUpdateDto,
   PrintResultDto,
   PrintTicketDto,
+  PartTicketParamsDto,
   TestPrinterDto,
 } from './printing.dto';
 import { PrintingService } from './printing.service';
@@ -108,6 +109,26 @@ class PrintingController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.service.enqueue(dto.printerId, user.id, id);
+  }
+
+  @Post('payments/:id/print-receipt')
+  @Auth('CASHIER', 'ADMIN', 'MANAGER')
+  receipt(
+    @Param() { id }: IdDto,
+    @Body() dto: PrintTicketDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.enqueueReceipt(id, dto.printerId, user.id);
+  }
+
+  @Post('orders/:id/bill-parts/:partId/print-ticket')
+  @Auth('CASHIER', 'ADMIN', 'MANAGER')
+  partTicket(
+    @Param() { id, partId }: PartTicketParamsDto,
+    @Body() dto: PrintTicketDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.enqueuePartTicket(id, partId, dto.printerId, user.id);
   }
 }
 

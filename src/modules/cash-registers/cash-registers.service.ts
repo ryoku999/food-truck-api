@@ -4,6 +4,7 @@ import {
   AuditAction,
   CashMovementType,
   CashSessionStatus,
+  PaymentStatus,
 } from '@/generated/prisma/enums';
 import type { AuthenticatedUser } from '@/shared/interfaces/authenticated-user.interface';
 import {
@@ -25,6 +26,7 @@ import {
 } from './dto/cash-register.dto';
 import {
   CashMovementResponse,
+  CashCollectionsResponse,
   CashRegisterResponse,
   CashSessionResponse,
 } from './interfaces/cash-register.interface';
@@ -57,6 +59,23 @@ const SESSION_SELECT = {
   openedBy: { select: USER_SELECT },
   closedBy: { select: USER_SELECT },
   movements: { select: MOVEMENT_SELECT, orderBy: { createdAt: 'asc' } },
+  payments: {
+    where: {
+      status: {
+        in: [
+          PaymentStatus.COMPLETED,
+          PaymentStatus.CANCELLED,
+          PaymentStatus.REFUNDED,
+        ],
+      },
+    },
+    select: {
+      status: true,
+      amount: true,
+      cashMovement: { select: { id: true } },
+      paymentMethod: { select: { id: true, code: true, name: true } },
+    },
+  },
 } satisfies Prisma.CashRegisterSessionSelect;
 const REGISTER_SELECT = {
   id: true,
@@ -247,36 +266,44 @@ export class CashRegistersService {
     if (dto.type === CashMovementType.ADJUSTMENT && dto.amount === 0) {
       throw new BadRequestException('El ajuste no puede ser cero');
     }
-    const movement = await this.db.$transaction(async (tx) => {
-      const session = await tx.cashRegisterSession.findUnique({
-        where: { id: params.id },
-        select: { id: true, status: true },
-      });
-      if (!session) throw new NotFoundException('Sesion de caja no encontrada');
-      if (session.status !== CashSessionStatus.OPEN) {
-        throw new ConflictException('La sesion de caja esta cerrada');
-      }
-      const created = await tx.cashMovement.create({
-        data: {
-          cashSessionId: session.id,
-          type: dto.type,
-          amount: new Prisma.Decimal(dto.amount),
-          description: dto.description,
-          userId: user.id,
-        },
-        select: MOVEMENT_SELECT,
-      });
-      await tx.auditLog.create({
-        data: {
-          userId: user.id,
-          action: AuditAction.UPDATE,
-          entity: 'CashMovement',
-          entityId: created.id,
-          description: `${dto.type} de ${new Prisma.Decimal(dto.amount).toFixed(2)}: ${dto.description}`,
-        },
-      });
-      return created;
-    });
+    const movement = await this.db.$transaction(
+      async (tx) => {
+        const session = await tx.cashRegisterSession.findUnique({
+          where: { id: params.id },
+          select: { id: true, status: true },
+        });
+        if (!session)
+          throw new NotFoundException('Sesion de caja no encontrada');
+        if (session.status !== CashSessionStatus.OPEN) {
+          throw new ConflictException('La sesion de caja esta cerrada');
+        }
+        await tx.cashRegisterSession.update({
+          where: { id: session.id },
+          data: { updatedAt: new Date() },
+        });
+        const created = await tx.cashMovement.create({
+          data: {
+            cashSessionId: session.id,
+            type: dto.type,
+            amount: new Prisma.Decimal(dto.amount),
+            description: dto.description,
+            userId: user.id,
+          },
+          select: MOVEMENT_SELECT,
+        });
+        await tx.auditLog.create({
+          data: {
+            userId: user.id,
+            action: AuditAction.UPDATE,
+            entity: 'CashMovement',
+            entityId: created.id,
+            description: `${dto.type} de ${new Prisma.Decimal(dto.amount).toFixed(2)}: ${dto.description}`,
+          },
+        });
+        return created;
+      },
+      { isolationLevel: 'Serializable' },
+    );
     return this.toMovementResponse(movement);
   }
 
@@ -375,6 +402,7 @@ export class CashRegistersService {
   }
 
   private toSessionResponse(session: SessionRecord): CashSessionResponse {
+    const { payments, ...data } = session;
     const summary = Object.values(CashMovementType).reduce(
       (result, type) => ({ ...result, [type]: '0' }),
       {} as Record<CashMovementType, string>,
@@ -389,16 +417,75 @@ export class CashRegistersService {
       session.movements,
     ).toString();
     return {
-      ...session,
+      ...data,
       openingAmount: session.openingAmount.toString(),
       expectedAmount: session.expectedAmount?.toString() ?? null,
       actualAmount: session.actualAmount?.toString() ?? null,
       difference: session.difference?.toString() ?? null,
       liveExpectedAmount,
       summary,
+      collections: this.summarizeCollections(payments),
       movements: session.movements.map((movement) =>
         this.toMovementResponse(movement),
       ),
+    };
+  }
+
+  private summarizeCollections(
+    payments: SessionRecord['payments'],
+  ): CashCollectionsResponse {
+    const zero = new Prisma.Decimal(0);
+    const methods = new Map<
+      string,
+      {
+        method: SessionRecord['payments'][number]['paymentMethod'];
+        amount: Prisma.Decimal;
+        cancelled: Prisma.Decimal;
+        refunded: Prisma.Decimal;
+        count: number;
+      }
+    >();
+    let cash = zero;
+    let nonCash = zero;
+    let cancelled = zero;
+    let refunded = zero;
+    for (const { paymentMethod, cashMovement, amount, status } of payments) {
+      const entry = methods.get(paymentMethod.id) ?? {
+        method: paymentMethod,
+        amount: zero,
+        cancelled: zero,
+        refunded: zero,
+        count: 0,
+      };
+      methods.set(paymentMethod.id, entry);
+      if (status === PaymentStatus.COMPLETED) {
+        entry.amount = entry.amount.add(amount);
+        entry.count++;
+        if (cashMovement) cash = cash.add(amount);
+        else nonCash = nonCash.add(amount);
+      } else if (status === PaymentStatus.CANCELLED) {
+        entry.cancelled = entry.cancelled.add(amount);
+        cancelled = cancelled.add(amount);
+      } else if (status === PaymentStatus.REFUNDED) {
+        entry.refunded = entry.refunded.add(amount);
+        refunded = refunded.add(amount);
+      }
+    }
+    return {
+      total: cash.add(nonCash).toFixed(2),
+      cash: cash.toFixed(2),
+      nonCash: nonCash.toFixed(2),
+      cancelled: cancelled.toFixed(2),
+      refunded: refunded.toFixed(2),
+      methods: [...methods.values()]
+        .sort((a, b) => a.method.code.localeCompare(b.method.code))
+        .map((entry) => ({
+          ...entry.method,
+          count: entry.count,
+          amount: entry.amount.toFixed(2),
+          cancelled: entry.cancelled.toFixed(2),
+          refunded: entry.refunded.toFixed(2),
+        })),
     };
   }
 

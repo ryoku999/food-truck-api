@@ -1,4 +1,5 @@
 import { DatabaseService } from '@/database/database.service';
+import { BillPartsService } from './bill-parts.service';
 import { Prisma } from '@/generated/prisma/client';
 import {
   AuditAction,
@@ -30,8 +31,13 @@ import {
 
 const PAYMENT_SELECT = {
   id: true,
+  cashSessionId: true,
+  billPartId: true,
+  pendingAfter: true,
   orderId: true,
   amount: true,
+  receivedAmount: true,
+  changeAmount: true,
   status: true,
   reference: true,
   notes: true,
@@ -61,6 +67,7 @@ export class PaymentsService {
   constructor(
     private readonly db: DatabaseService,
     private readonly operationsEvents: OperationsEventsService,
+    private readonly billParts: BillPartsService,
   ) {}
 
   async create(
@@ -79,9 +86,10 @@ export class PaymentsService {
               status: true,
               total: true,
               tables: { select: { tableId: true } },
+              billParts: { select: { id: true, total: true } },
               payments: {
                 where: { status: PaymentStatus.COMPLETED },
-                select: { amount: true },
+                select: { amount: true, billPartId: true },
               },
             },
           }),
@@ -109,35 +117,99 @@ export class PaymentsService {
         }
 
         const amount = new Prisma.Decimal(dto.amount);
+        const cash = method.code === PaymentMethodCode.CASH;
+        const receivedAmount =
+          dto.receivedAmount == null
+            ? null
+            : new Prisma.Decimal(dto.receivedAmount);
+        if (cash && (!receivedAmount || receivedAmount.lessThan(amount))) {
+          throw new BadRequestException(
+            'El efectivo recibido debe ser mayor o igual al monto aplicado',
+          );
+        }
+        if (!cash && receivedAmount !== null) {
+          throw new BadRequestException(
+            'El efectivo recibido solo corresponde a pagos en efectivo',
+          );
+        }
+        const changeAmount = receivedAmount?.sub(amount) ?? null;
         const paid = order.payments.reduce(
           (total, payment) => total.add(payment.amount),
           new Prisma.Decimal(0),
         );
         const pending = order.total.sub(paid);
+        if (dto.billPartId && dto.productSelection) {
+          throw new BadRequestException(
+            'Elige una parte existente o una selección nueva',
+          );
+        }
+        if (
+          order.billParts.length &&
+          !dto.billPartId &&
+          !dto.productSelection
+        ) {
+          throw new ConflictException(
+            'Selecciona una parte para cobrar este pedido',
+          );
+        }
+        if (dto.billPartId) {
+          const part = order.billParts.find(
+            (item) => item.id === dto.billPartId,
+          );
+          if (!part)
+            throw new NotFoundException('Parte no encontrada en este pedido');
+          const partPaid = order.payments
+            .filter((item) => item.billPartId === part.id)
+            .reduce((sum, item) => sum.add(item.amount), new Prisma.Decimal(0));
+          if (amount.greaterThan(part.total.sub(partPaid))) {
+            throw new BadRequestException(
+              'El monto supera el saldo de la parte',
+            );
+          }
+        }
         if (amount.greaterThan(pending)) {
           throw new BadRequestException(
             `El monto excede el saldo pendiente de ${pending.toFixed(2)}`,
           );
         }
 
-        if (method.code === PaymentMethodCode.CASH) {
-          if (!dto.cashSessionId) {
-            throw new BadRequestException(
-              'Los pagos en efectivo requieren una sesion de caja',
+        await this.lockOpenCashSession(tx, dto.cashSessionId);
+        let billPartId = dto.billPartId;
+        if (dto.productSelection) {
+          const part = await this.billParts.createInTransaction(
+            tx,
+            order.id,
+            dto.productSelection,
+            user.id,
+          );
+          if (!part.total.equals(dto.productSelection.expectedTotal)) {
+            throw new ConflictException(
+              'Cambió el total de la selección. Actualiza la cuenta y revisa el importe',
             );
           }
-          await this.ensureOpenCashSession(tx, dto.cashSessionId);
-        } else if (dto.cashSessionId) {
-          throw new BadRequestException(
-            'cashSessionId solo corresponde a pagos en efectivo',
-          );
+          if (amount.greaterThan(part.total)) {
+            throw new BadRequestException(
+              'El monto supera el total de la selección',
+            );
+          }
+          billPartId = part.id;
+        } else {
+          await tx.order.update({
+            where: { id: order.id },
+            data: { updatedAt: new Date() },
+          });
         }
 
         const payment = await tx.payment.create({
           data: {
             orderId: order.id,
             paymentMethodId: method.id,
+            cashSessionId: dto.cashSessionId,
+            billPartId,
+            pendingAfter: pending.sub(amount),
             amount,
+            receivedAmount,
+            changeAmount,
             reference: dto.reference,
             notes: dto.notes,
             userId: user.id,
@@ -145,7 +217,7 @@ export class PaymentsService {
           select: { id: true },
         });
 
-        if (method.code === PaymentMethodCode.CASH && dto.cashSessionId) {
+        if (cash) {
           await tx.cashMovement.create({
             data: {
               cashSessionId: dto.cashSessionId,
@@ -240,6 +312,8 @@ export class PaymentsService {
             id: true,
             amount: true,
             status: true,
+            cashSessionId: true,
+            billPartId: true,
             order: { select: { id: true, number: true, status: true } },
             cashMovement: { select: { id: true } },
           },
@@ -248,9 +322,36 @@ export class PaymentsService {
         if (payment.status !== PaymentStatus.COMPLETED) {
           throw new ConflictException('El pago ya no puede cancelarse');
         }
+        if (payment.cashSessionId) {
+          await this.lockOpenCashSession(tx, payment.cashSessionId);
+        }
+        await tx.order.update({
+          where: { id: payment.order.id },
+          data: { updatedAt: new Date() },
+        });
         await tx.payment.update({
           where: { id: payment.id },
           data: { status: PaymentStatus.CANCELLED },
+        });
+        await tx.printJob.updateMany({
+          where: {
+            orderId: payment.order.id,
+            status: { in: ['PENDING', 'FAILED'] },
+            OR: [
+              { type: 'CUSTOMER_TICKET' },
+              { documentKey: `payment:${payment.id}` },
+              ...(payment.billPartId
+                ? [
+                    {
+                      documentKey: {
+                        startsWith: `part:${payment.billPartId}:`,
+                      },
+                    },
+                  ]
+                : []),
+            ],
+          },
+          data: { status: 'CANCELLED', error: 'Pago anulado' },
         });
         if (payment.cashMovement) {
           await tx.cashMovement.update({
@@ -264,6 +365,36 @@ export class PaymentsService {
           });
         }
         if (payment.order.status === OrderStatus.PAID) {
+          const tables = await tx.orderTable.findMany({
+            where: { orderId: payment.order.id },
+            select: {
+              tableId: true,
+              table: { select: { active: true, status: true } },
+            },
+          });
+          const tableIds = tables.map((table) => table.tableId);
+          if (
+            tables.some(
+              ({ table }) =>
+                !table.active || table.status === TableStatus.DISABLED,
+            ) ||
+            (tableIds.length &&
+              (await tx.orderTable.count({
+                where: {
+                  tableId: { in: tableIds },
+                  orderId: { not: payment.order.id },
+                  order: {
+                    status: {
+                      notIn: [OrderStatus.PAID, OrderStatus.CANCELLED],
+                    },
+                  },
+                },
+              })))
+          ) {
+            throw new ConflictException(
+              'No se puede reabrir el pedido: una mesa ya no está disponible',
+            );
+          }
           await tx.order.update({
             where: { id: payment.order.id },
             data: {
@@ -273,6 +404,11 @@ export class PaymentsService {
               closedById: null,
             },
           });
+          if (tableIds.length)
+            await tx.table.updateMany({
+              where: { id: { in: tableIds } },
+              data: { status: TableStatus.OCCUPIED },
+            });
         }
         await tx.auditLog.create({
           data: {
@@ -300,24 +436,26 @@ export class PaymentsService {
     return this.toResponse(payment);
   }
 
-  private async ensureOpenCashSession(
+  private async lockOpenCashSession(
     tx: Prisma.TransactionClient,
     cashSessionId: string,
   ): Promise<void> {
+    // Serialize payments and cancellations with the update that closes the turn.
+    const updated = await tx.cashRegisterSession.updateMany({
+      where: {
+        id: cashSessionId,
+        status: CashSessionStatus.OPEN,
+        cashRegister: { active: true },
+      },
+      data: { updatedAt: new Date() },
+    });
+    if (updated.count) return;
     const session = await tx.cashRegisterSession.findUnique({
       where: { id: cashSessionId },
-      select: {
-        status: true,
-        cashRegister: { select: { active: true } },
-      },
+      select: { id: true },
     });
     if (!session) throw new NotFoundException('Sesion de caja no encontrada');
-    if (
-      session.status !== CashSessionStatus.OPEN ||
-      !session.cashRegister.active
-    ) {
-      throw new ConflictException('La sesion de caja no esta abierta y activa');
-    }
+    throw new ConflictException('La sesion de caja no esta abierta y activa');
   }
 
   private async emitOrderPaymentChanges(
@@ -348,13 +486,24 @@ export class PaymentsService {
   }
 
   private toResponse(payment: PaymentRecord): PaymentResponse {
-    const { order, amount, cashMovement, ...data } = payment;
+    const {
+      order,
+      amount,
+      receivedAmount,
+      changeAmount,
+      pendingAfter,
+      cashMovement,
+      ...data
+    } = payment;
     return {
       ...data,
       orderId: payment.orderId,
       orderNumber: order.number,
       orderStatus: order.status,
       amount: amount.toString(),
+      receivedAmount: receivedAmount?.toFixed(2) ?? null,
+      changeAmount: changeAmount?.toFixed(2) ?? null,
+      pendingAfter: pendingAfter?.toFixed(2) ?? null,
       cashMovement: cashMovement
         ? { ...cashMovement, amount: cashMovement.amount.toString() }
         : null,

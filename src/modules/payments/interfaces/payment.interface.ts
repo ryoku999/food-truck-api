@@ -8,6 +8,9 @@ import {
 export interface PaymentResponse {
   id: string;
   orderId: string;
+  cashSessionId: string | null;
+  billPartId: string | null;
+  pendingAfter: string | null;
   orderNumber: number;
   orderStatus: OrderStatus;
   paymentMethod: {
@@ -16,6 +19,8 @@ export interface PaymentResponse {
     name: string;
   };
   amount: string;
+  receivedAmount: string | null;
+  changeAmount: string | null;
   status: PaymentStatus;
   reference: string | null;
   notes: string | null;

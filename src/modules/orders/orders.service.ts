@@ -1,4 +1,5 @@
 import { DatabaseService } from '@/database/database.service';
+import { ensureOrderUnbilled } from '@/modules/payments/ensure-order-unbilled';
 import { Prisma } from '@/generated/prisma/client';
 import {
   AuditAction,
@@ -468,57 +469,61 @@ export class OrdersService {
     dto: CancelOrderDto,
     user: AuthenticatedUser,
   ): Promise<OrderDetailResponse> {
-    await this.db.$transaction(async (tx) => {
-      const order = await tx.order.findUnique({
-        where: { id: params.id },
-        select: {
-          number: true,
-          status: true,
-          tables: { select: { tableId: true } },
-        },
-      });
-      if (!order) throw new NotFoundException('Pedido no encontrado');
-      if (
-        order.status === OrderStatus.PAID ||
-        order.status === OrderStatus.CANCELLED
-      ) {
-        throw new ConflictException('El pedido ya esta cerrado');
-      }
-      const now = new Date();
-      await tx.order.update({
-        where: { id: params.id },
-        data: {
-          status: OrderStatus.CANCELLED,
-          closedAt: now,
-          closedById: user.id,
-        },
-      });
-      await tx.orderItem.updateMany({
-        where: {
-          orderId: params.id,
-          status: { not: OrderItemStatus.CANCELLED },
-        },
-        data: {
-          status: OrderItemStatus.CANCELLED,
-          cancelledAt: now,
-          cancelledById: user.id,
-          cancellationReason: dto.reason,
-        },
-      });
-      await this.releaseTables(
-        tx,
-        order.tables.map(({ tableId }) => tableId),
-      );
-      await tx.auditLog.create({
-        data: {
-          userId: user.id,
-          action: AuditAction.CANCEL,
-          entity: 'Order',
-          entityId: params.id,
-          description: `Pedido #${order.number} cancelado: ${dto.reason}`,
-        },
-      });
-    });
+    await this.db.$transaction(
+      async (tx) => {
+        const order = await tx.order.findUnique({
+          where: { id: params.id },
+          select: {
+            number: true,
+            status: true,
+            tables: { select: { tableId: true } },
+          },
+        });
+        if (!order) throw new NotFoundException('Pedido no encontrado');
+        if (
+          order.status === OrderStatus.PAID ||
+          order.status === OrderStatus.CANCELLED
+        ) {
+          throw new ConflictException('El pedido ya esta cerrado');
+        }
+        await ensureOrderUnbilled(tx, params.id);
+        const now = new Date();
+        await tx.order.update({
+          where: { id: params.id },
+          data: {
+            status: OrderStatus.CANCELLED,
+            closedAt: now,
+            closedById: user.id,
+          },
+        });
+        await tx.orderItem.updateMany({
+          where: {
+            orderId: params.id,
+            status: { not: OrderItemStatus.CANCELLED },
+          },
+          data: {
+            status: OrderItemStatus.CANCELLED,
+            cancelledAt: now,
+            cancelledById: user.id,
+            cancellationReason: dto.reason,
+          },
+        });
+        await this.releaseTables(
+          tx,
+          order.tables.map(({ tableId }) => tableId),
+        );
+        await tx.auditLog.create({
+          data: {
+            userId: user.id,
+            action: AuditAction.CANCEL,
+            entity: 'Order',
+            entityId: params.id,
+            description: `Pedido #${order.number} cancelado: ${dto.reason}`,
+          },
+        });
+      },
+      { isolationLevel: 'Serializable' },
+    );
     const response = await this.findOne(params);
     this.operationsEvents.emitOrderStatusChanged({
       orderId: response.id,
@@ -549,54 +554,58 @@ export class OrdersService {
     dto: CancelOrderItemDto,
     user: AuthenticatedUser,
   ): Promise<OrderDetailResponse> {
-    await this.db.$transaction(async (tx) => {
-      const item = await tx.orderItem.findFirst({
-        where: { id: params.itemId, orderId: params.id },
-        select: {
-          id: true,
-          status: true,
-          productNameSnapshot: true,
-          order: { select: { status: true } },
-        },
-      });
-      if (!item) throw new NotFoundException('Item de pedido no encontrado');
-      if (item.order.status === OrderStatus.DRAFT) {
-        throw new ConflictException(
-          'Mientras el pedido esta en borrador el item debe editarse o eliminarse',
-        );
-      }
-      if (
-        item.order.status === OrderStatus.PAID ||
-        item.order.status === OrderStatus.CANCELLED
-      ) {
-        throw new ConflictException('El pedido ya esta cerrado');
-      }
-      if (
-        item.status === OrderItemStatus.CANCELLED ||
-        item.status === OrderItemStatus.SERVED
-      ) {
-        throw new ConflictException('El item ya no puede cancelarse');
-      }
-      await tx.orderItem.update({
-        where: { id: item.id },
-        data: {
-          status: OrderItemStatus.CANCELLED,
-          cancelledAt: new Date(),
-          cancelledById: user.id,
-          cancellationReason: dto.reason,
-        },
-      });
-      await this.recalculateTotals(tx, params.id);
-      await tx.auditLog.create({
-        data: {
-          userId: user.id,
-          action: AuditAction.CANCEL,
-          entity: 'OrderItem',
-          entityId: item.id,
-          description: `${item.productNameSnapshot} cancelado: ${dto.reason}`,
-        },
-      });
-    });
+    await this.db.$transaction(
+      async (tx) => {
+        const item = await tx.orderItem.findFirst({
+          where: { id: params.itemId, orderId: params.id },
+          select: {
+            id: true,
+            status: true,
+            productNameSnapshot: true,
+            order: { select: { status: true } },
+          },
+        });
+        if (!item) throw new NotFoundException('Item de pedido no encontrado');
+        if (item.order.status === OrderStatus.DRAFT) {
+          throw new ConflictException(
+            'Mientras el pedido esta en borrador el item debe editarse o eliminarse',
+          );
+        }
+        if (
+          item.order.status === OrderStatus.PAID ||
+          item.order.status === OrderStatus.CANCELLED
+        ) {
+          throw new ConflictException('El pedido ya esta cerrado');
+        }
+        if (
+          item.status === OrderItemStatus.CANCELLED ||
+          item.status === OrderItemStatus.SERVED
+        ) {
+          throw new ConflictException('El item ya no puede cancelarse');
+        }
+        await ensureOrderUnbilled(tx, params.id);
+        await tx.orderItem.update({
+          where: { id: item.id },
+          data: {
+            status: OrderItemStatus.CANCELLED,
+            cancelledAt: new Date(),
+            cancelledById: user.id,
+            cancellationReason: dto.reason,
+          },
+        });
+        await this.recalculateTotals(tx, params.id);
+        await tx.auditLog.create({
+          data: {
+            userId: user.id,
+            action: AuditAction.CANCEL,
+            entity: 'OrderItem',
+            entityId: item.id,
+            description: `${item.productNameSnapshot} cancelado: ${dto.reason}`,
+          },
+        });
+      },
+      { isolationLevel: 'Serializable' },
+    );
     const response = await this.findOne({ id: params.id });
     const item = response.items.find(({ id }) => id === params.itemId);
     if (item) {
@@ -683,7 +692,7 @@ export class OrdersService {
         variants: {
           where: dto.productVariantId
             ? { id: dto.productVariantId }
-            : { id: '__none__' },
+            : { id: { in: [] } },
           select: {
             id: true,
             name: true,

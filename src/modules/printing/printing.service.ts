@@ -35,6 +35,22 @@ const safeError = 'RETRYABLE: ';
 const hash = (token: string) =>
   createHash('sha256').update(token).digest('hex');
 
+function paymentLines(payment: {
+  paymentMethod: { name: string };
+  amount: Prisma.Decimal;
+  receivedAmount: Prisma.Decimal | null;
+  changeAmount: Prisma.Decimal | null;
+}) {
+  return [
+    `${payment.paymentMethod.name}: ${payment.amount.toFixed(2)}`,
+    ...(payment.receivedAmount !== null && payment.changeAmount !== null
+      ? [
+          `  Recibido: ${payment.receivedAmount.toFixed(2)} | Vuelto: ${payment.changeAmount.toFixed(2)}`,
+        ]
+      : []),
+  ];
+}
+
 @Injectable()
 export class PrintingService {
   constructor(private readonly db: DatabaseService) {}
@@ -243,6 +259,11 @@ export class PrintingService {
         : null;
       if (orderId && !order)
         throw new NotFoundException('Pedido no encontrado');
+      if (order && order.status !== 'PAID') {
+        throw new ConflictException(
+          'El ticket general requiere un pedido pagado',
+        );
+      }
       const lines = order
         ? [
             `Pedido #${order.number}`,
@@ -251,10 +272,7 @@ export class PrintingService {
                 `${item.quantity} x ${item.productNameSnapshot}${item.variantNameSnapshot ? ' / ' + item.variantNameSnapshot : ''}  ${item.subtotal.toFixed(2)}`,
             ),
             `Total: ${order.total.toFixed(2)}`,
-            ...order.payments.map(
-              (payment) =>
-                `${payment.paymentMethod.name}: ${payment.amount.toFixed(2)}`,
-            ),
+            ...order.payments.flatMap(paymentLines),
           ]
         : ['Prueba de impresión', printer.name, message ?? ''];
       const job = await tx.printJob.create({
@@ -280,6 +298,172 @@ export class PrintingService {
       });
       return job;
     });
+  }
+
+  enqueueReceipt(
+    paymentId: string,
+    printerId: string | undefined,
+    userId: string,
+  ) {
+    return this.db.$transaction(
+      async (tx) => {
+        const payment = await tx.payment.findUnique({
+          where: { id: paymentId },
+          include: {
+            order: { select: { number: true, status: true } },
+            paymentMethod: true,
+          },
+        });
+        if (!payment) throw new NotFoundException('Pago no encontrado');
+        if (
+          payment.billPartId ||
+          payment.status !== 'COMPLETED' ||
+          payment.pendingAfter === null ||
+          payment.order.status === 'CANCELLED'
+        ) {
+          throw new ConflictException('Este pago no admite un recibo de abono');
+        }
+        return this.enqueueDocument(tx, {
+          documentKey: `payment:${payment.id}`,
+          orderId: payment.orderId,
+          printerId,
+          userId,
+          type: 'PAYMENT_RECEIPT',
+          lines: [
+            'Recibo interno de abono',
+            `Pedido #${payment.order.number}`,
+            ...paymentLines(payment),
+            `Saldo tras el abono: ${payment.pendingAfter.toFixed(2)}`,
+          ],
+        });
+      },
+      { isolationLevel: 'Serializable' },
+    );
+  }
+
+  enqueuePartTicket(
+    orderId: string,
+    partId: string,
+    printerId: string | undefined,
+    userId: string,
+  ) {
+    return this.db.$transaction(
+      async (tx) => {
+        const part = await tx.billPart.findUnique({
+          where: { id: partId, orderId },
+          include: {
+            order: { select: { number: true, status: true } },
+            items: {
+              include: {
+                orderItem: {
+                  select: {
+                    productNameSnapshot: true,
+                    variantNameSnapshot: true,
+                  },
+                },
+              },
+              orderBy: { orderItemId: 'asc' },
+            },
+            payments: {
+              where: { status: 'COMPLETED' },
+              include: { paymentMethod: true },
+              orderBy: [{ paidAt: 'asc' }, { id: 'asc' }],
+            },
+          },
+        });
+        if (!part)
+          throw new NotFoundException('Parte no encontrada en este pedido');
+        const paid = part.payments.reduce(
+          (total, payment) => total.add(payment.amount),
+          new Prisma.Decimal(0),
+        );
+        if (!paid.equals(part.total) || part.order.status === 'CANCELLED') {
+          throw new ConflictException(
+            'Completa el pago de esta parte antes de imprimir',
+          );
+        }
+        const version = hash(
+          part.payments
+            .map((payment) => payment.id)
+            .sort()
+            .join(','),
+        );
+        return this.enqueueDocument(tx, {
+          documentKey: `part:${part.id}:${version}`,
+          orderId,
+          printerId,
+          userId,
+          type: 'PART_TICKET',
+          itemIds: part.items.map((item) => item.orderItemId),
+          lines: [
+            `Pedido #${part.order.number} | ${part.name}`,
+            ...part.items.map(
+              ({ quantity, amount, orderItem }) =>
+                `${quantity} x ${orderItem.productNameSnapshot}${orderItem.variantNameSnapshot ? ' / ' + orderItem.variantNameSnapshot : ''}: ${amount.toFixed(2)}`,
+            ),
+            `Total de la parte: ${part.total.toFixed(2)}`,
+            ...part.payments.flatMap(paymentLines),
+          ],
+        });
+      },
+      { isolationLevel: 'Serializable' },
+    );
+  }
+
+  private async enqueueDocument(
+    tx: Prisma.TransactionClient,
+    data: {
+      documentKey: string;
+      orderId: string;
+      printerId?: string;
+      userId: string;
+      type: 'PAYMENT_RECEIPT' | 'PART_TICKET';
+      lines: string[];
+      itemIds?: string[];
+    },
+  ) {
+    const existing = await tx.printJob.findUnique({
+      where: { documentKey: data.documentKey },
+    });
+    if (existing) return existing;
+    const printer = await tx.printer.findFirst({
+      where: {
+        ...readyPrinter,
+        id: data.printerId,
+        purpose: { in: ['CASHIER', 'GENERAL'] },
+      },
+      orderBy: [{ purpose: 'asc' }, { id: 'asc' }],
+    });
+    if (!printer)
+      throw new NotFoundException(
+        'No hay una impresora activa asignada a un agente',
+      );
+    await tx.order.update({
+      where: { id: data.orderId },
+      data: { updatedAt: new Date() },
+    });
+    const job = await tx.printJob.create({
+      data: {
+        documentKey: data.documentKey,
+        orderId: data.orderId,
+        printerId: printer.id,
+        type: data.type,
+        payload: { lines: data.lines },
+        items: {
+          create: data.itemIds?.map((orderItemId) => ({ orderItemId })) ?? [],
+        },
+      },
+    });
+    await tx.auditLog.create({
+      data: {
+        action: 'PRINT',
+        entity: 'PrintJob',
+        entityId: job.id,
+        userId: data.userId,
+        description: job.type,
+      },
+    });
+    return job;
   }
 
   private async authenticate(tx: Prisma.TransactionClient, header?: string) {
