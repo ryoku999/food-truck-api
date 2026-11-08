@@ -12,6 +12,7 @@ import {
   TableStatus,
 } from '@/generated/prisma/enums';
 import type { AuthenticatedUser } from '@/shared/interfaces/authenticated-user.interface';
+import { OperationsEventsService } from '@/modules/realtime/operations-events.service';
 import {
   BadRequestException,
   ConflictException,
@@ -133,7 +134,10 @@ type OrderRecord = Prisma.OrderGetPayload<{ select: typeof ORDER_SELECT }>;
 
 @Injectable()
 export class OrdersService {
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly operationsEvents: OperationsEventsService,
+  ) {}
 
   async create(
     dto: CreateOrderDto,
@@ -427,7 +431,36 @@ export class OrdersService {
       },
       { isolationLevel: 'Serializable' },
     );
-    return this.findOne(params);
+    const response = await this.findOne(params);
+    this.operationsEvents.emitOrderSent(response);
+    for (const item of response.items) {
+      if (item.productionArea === ProductionAreaCode.KITCHEN) {
+        this.operationsEvents.emitKitchenItemCreated(item);
+      } else if (item.productionArea === ProductionAreaCode.BAR) {
+        this.operationsEvents.emitBarItemCreated(item);
+      }
+    }
+    for (const table of response.tables) {
+      this.operationsEvents.emitTableStatusChanged({
+        tableId: table.id,
+        status: TableStatus.OCCUPIED,
+        orderId: response.id,
+      });
+    }
+    const printJobs = await this.db.printJob.findMany({
+      where: { orderId: response.id },
+      select: {
+        id: true,
+        printerId: true,
+        orderId: true,
+        type: true,
+        status: true,
+      },
+    });
+    for (const printJob of printJobs) {
+      this.operationsEvents.emitPrintJobStatusChanged(printJob);
+    }
+    return response;
   }
 
   async cancel(
@@ -486,7 +519,29 @@ export class OrdersService {
         },
       });
     });
-    return this.findOne(params);
+    const response = await this.findOne(params);
+    this.operationsEvents.emitOrderStatusChanged({
+      orderId: response.id,
+      status: response.status,
+    });
+    for (const item of response.items) {
+      this.operationsEvents.emitOrderItemStatusChanged(
+        item,
+        item.productionArea === ProductionAreaCode.KITCHEN
+          ? 'KITCHEN'
+          : item.productionArea === ProductionAreaCode.BAR
+            ? 'BAR'
+            : undefined,
+      );
+    }
+    for (const table of response.tables) {
+      this.operationsEvents.emitTableStatusChanged({
+        tableId: table.id,
+        status: TableStatus.AVAILABLE,
+        orderId: response.id,
+      });
+    }
+    return response;
   }
 
   async cancelItem(
@@ -542,7 +597,23 @@ export class OrdersService {
         },
       });
     });
-    return this.findOne({ id: params.id });
+    const response = await this.findOne({ id: params.id });
+    const item = response.items.find(({ id }) => id === params.itemId);
+    if (item) {
+      this.operationsEvents.emitOrderItemStatusChanged(
+        item,
+        item.productionArea === ProductionAreaCode.KITCHEN
+          ? 'KITCHEN'
+          : item.productionArea === ProductionAreaCode.BAR
+            ? 'BAR'
+            : undefined,
+      );
+    }
+    this.operationsEvents.emitOrderStatusChanged({
+      orderId: response.id,
+      status: response.status,
+    });
+    return response;
   }
 
   async summary(params: OrderIdParamDto): Promise<OrderSummaryResponse> {

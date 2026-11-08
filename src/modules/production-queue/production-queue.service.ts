@@ -8,6 +8,7 @@ import {
   TableStatus,
 } from '@/generated/prisma/enums';
 import type { AuthenticatedUser } from '@/shared/interfaces/authenticated-user.interface';
+import { OperationsEventsService } from '@/modules/realtime/operations-events.service';
 import {
   BadRequestException,
   ConflictException,
@@ -98,7 +99,10 @@ const ALLOWED_TRANSITIONS: Record<OrderItemStatus, OrderItemStatus[]> = {
 
 @Injectable()
 export class ProductionQueueService {
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly operationsEvents: OperationsEventsService,
+  ) {}
 
   async findQueue(
     area: ProductionAreaCode,
@@ -237,7 +241,25 @@ export class ProductionQueueService {
       },
       { isolationLevel: 'Serializable' },
     );
-    return this.findOne(area, params.id);
+    const response = await this.findOne(area, params.id);
+    this.operationsEvents.emitOrderItemStatusChanged(
+      response,
+      area === ProductionAreaCode.KITCHEN ? 'KITCHEN' : 'BAR',
+    );
+    this.operationsEvents.emitOrderStatusChanged({
+      orderId: response.orderId,
+      status: response.orderStatus,
+    });
+    if (response.orderStatus === OrderStatus.CANCELLED) {
+      for (const table of response.tables) {
+        this.operationsEvents.emitTableStatusChanged({
+          tableId: table.id,
+          status: TableStatus.AVAILABLE,
+          orderId: response.orderId,
+        });
+      }
+    }
+    return response;
   }
 
   private async findOne(

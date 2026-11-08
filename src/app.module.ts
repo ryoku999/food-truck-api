@@ -20,6 +20,9 @@ import { ProductsModule } from './modules/products/products.module';
 import { PaymentMethodsModule } from './modules/payment-methods/payment-methods.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { ProductionQueueModule } from './modules/production-queue/production-queue.module';
+import { RealtimeModule } from './modules/realtime/realtime.module';
+import { PaymentsModule } from './modules/payments/payments.module';
+import { CashRegistersModule } from './modules/cash-registers/cash-registers.module';
 
 @Module({
   imports: [
@@ -52,6 +55,9 @@ import { ProductionQueueModule } from './modules/production-queue/production-que
     PaymentMethodsModule,
     OrdersModule,
     ProductionQueueModule,
+    RealtimeModule,
+    PaymentsModule,
+    CashRegistersModule,
   ],
   controllers: [AppController],
   providers: [

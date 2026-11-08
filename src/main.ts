@@ -7,6 +7,7 @@ import { ResponseInterceptor } from './shared/interceptors/response.interceptor'
 import helmet from 'helmet';
 import compression from 'compression';
 import cookieParser from 'cookie-parser';
+import { ConfiguredSocketIoAdapter } from './modules/realtime/socket-io.adapter';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -37,6 +38,8 @@ async function bootstrap() {
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   });
+
+  app.useWebSocketAdapter(new ConfiguredSocketIoAdapter(app, corsOrigins));
 
   app.use(helmet());
   app.use(compression());
