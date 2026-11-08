@@ -25,6 +25,7 @@ import { PaymentsModule } from './modules/payments/payments.module';
 import { CashRegistersModule } from './modules/cash-registers/cash-registers.module';
 import { PrintingModule } from './modules/printing/printing.module';
 import { AuditLogsModule } from './modules/audit-logs/audit-logs.module';
+import { ReportsModule } from './modules/reports/reports.module';
 
 @Module({
   imports: [
@@ -62,6 +63,7 @@ import { AuditLogsModule } from './modules/audit-logs/audit-logs.module';
     CashRegistersModule,
     PrintingModule,
     AuditLogsModule,
+    ReportsModule,
   ],
   controllers: [AppController],
   providers: [
