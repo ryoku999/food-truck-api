@@ -1,5 +1,7 @@
 import { UserRole } from '@/generated/prisma/enums';
 import { Auth } from '@/shared/decorators/auth.decorator';
+import { CurrentUser } from '@/shared/decorators/current-user.decorator';
+import type { AuthenticatedUser } from '@/shared/interfaces/authenticated-user.interface';
 import {
   Body,
   Controller,
@@ -75,8 +77,9 @@ export class ProductsController {
   update(
     @Param() params: ProductIdParamDto,
     @Body() dto: UpdateProductDto,
+    @CurrentUser() actor: AuthenticatedUser,
   ): Promise<ProductDetailResponse> {
-    return this.productsService.update(params, dto);
+    return this.productsService.update(params, dto, actor.id);
   }
 
   @Patch(':id/status')

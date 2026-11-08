@@ -35,22 +35,38 @@ const USER_SELECT = {
 export class UsersService {
   constructor(private readonly db: DatabaseService) {}
 
-  async create(dto: CreateUserDto): Promise<UserResponse> {
+  async create(dto: CreateUserDto, actorId: string): Promise<UserResponse> {
     await this.ensureUniqueIdentity(dto.username, dto.dni);
     const password = await bcrypt.hash(dto.password, 12);
 
     try {
-      return await this.db.user.create({
-        data: {
-          username: dto.username,
-          dni: dto.dni,
-          password,
-          firstName: dto.firstName,
-          lastName: dto.lastName,
-          userRole: dto.userRole,
-          status: dto.status,
-        },
-        select: USER_SELECT,
+      return await this.db.$transaction(async (tx) => {
+        const user = await tx.user.create({
+          data: {
+            username: dto.username,
+            dni: dto.dni,
+            password,
+            firstName: dto.firstName,
+            lastName: dto.lastName,
+            userRole: dto.userRole,
+            status: dto.status,
+          },
+          select: USER_SELECT,
+        });
+        await tx.auditLog.create({
+          data: {
+            action: 'CREATE',
+            entity: 'User',
+            entityId: user.id,
+            userId: actorId,
+            newData: {
+              username: user.username,
+              userRole: user.userRole,
+              status: user.status,
+            },
+          },
+        });
+        return user;
       });
     } catch (error: unknown) {
       this.rethrowUniqueConstraint(error);
@@ -113,6 +129,7 @@ export class UsersService {
   async update(
     params: UserIdParamDto,
     dto: UpdateUserDto,
+    actorId: string,
   ): Promise<UserResponse> {
     if (dto.username || dto.dni) {
       await this.ensureUniqueIdentity(dto.username, dto.dni, params.id);
@@ -134,11 +151,25 @@ export class UsersService {
             await this.ensureAdminRemains(transaction, current);
           }
 
-          return transaction.user.update({
+          const user = await transaction.user.update({
             where: { id: params.id },
             data: dto,
             select: USER_SELECT,
           });
+          await transaction.auditLog.create({
+            data: {
+              action: 'UPDATE',
+              entity: 'User',
+              entityId: user.id,
+              userId: actorId,
+              newData: {
+                username: user.username,
+                userRole: user.userRole,
+                status: user.status,
+              },
+            },
+          });
+          return user;
         },
         { isolationLevel: 'Serializable' },
       );
@@ -151,6 +182,7 @@ export class UsersService {
   async updateStatus(
     params: UserIdParamDto,
     dto: UpdateUserStatusDto,
+    actorId: string,
   ): Promise<UserResponse> {
     return this.db.$transaction(
       async (transaction) => {
@@ -179,6 +211,16 @@ export class UsersService {
           });
         }
 
+        await transaction.auditLog.create({
+          data: {
+            action: 'UPDATE',
+            entity: 'User',
+            entityId: user.id,
+            userId: actorId,
+            oldData: { status: current.status },
+            newData: { status: user.status },
+          },
+        });
         return user;
       },
       { isolationLevel: 'Serializable' },

@@ -60,13 +60,23 @@ export class AuthService {
 
     const refreshExpiresAt = new Date(Date.now() + this.refreshExpiresInMs);
 
-    await this.db.refreshToken.create({
-      data: {
-        userId: userFound.id,
-        tokenHash: hashRefreshToken(tokens.refreshToken),
-        expiresAt: refreshExpiresAt,
-      },
-    });
+    await this.db.$transaction([
+      this.db.refreshToken.create({
+        data: {
+          userId: userFound.id,
+          tokenHash: hashRefreshToken(tokens.refreshToken),
+          expiresAt: refreshExpiresAt,
+        },
+      }),
+      this.db.auditLog.create({
+        data: {
+          action: 'LOGIN',
+          entity: 'User',
+          entityId: userFound.id,
+          userId: userFound.id,
+        },
+      }),
+    ]);
 
     return {
       tokens,
@@ -101,8 +111,23 @@ export class AuthService {
       return;
     }
 
-    await this.db.refreshToken.deleteMany({
-      where: { tokenHash: hashRefreshToken(rawRefreshToken) },
+    await this.db.$transaction(async (tx) => {
+      const where = { tokenHash: hashRefreshToken(rawRefreshToken) };
+      const session = await tx.refreshToken.findUnique({
+        where,
+        select: { userId: true },
+      });
+      if (!session) return;
+      const deleted = await tx.refreshToken.deleteMany({ where });
+      if (deleted.count)
+        await tx.auditLog.create({
+          data: {
+            action: 'LOGOUT',
+            entity: 'User',
+            entityId: session.userId,
+            userId: session.userId,
+          },
+        });
     });
   }
 

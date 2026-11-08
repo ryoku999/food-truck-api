@@ -37,37 +37,65 @@ export class BusinessService {
     return this.toResponse(business);
   }
 
-  async upsert(dto: UpsertBusinessDto): Promise<BusinessResponse> {
-    const business = await this.db.business.upsert({
-      where: { id: BUSINESS_ID },
-      create: { id: BUSINESS_ID, ...dto },
-      update: dto,
-      include: BUSINESS_INCLUDE,
-    });
+  async upsert(
+    dto: UpsertBusinessDto,
+    actorId: string,
+  ): Promise<BusinessResponse> {
+    const [business] = await this.db.$transaction([
+      this.db.business.upsert({
+        where: { id: BUSINESS_ID },
+        create: { id: BUSINESS_ID, ...dto },
+        update: dto,
+        include: BUSINESS_INCLUDE,
+      }),
+      this.db.auditLog.create({
+        data: {
+          action: 'UPDATE',
+          entity: 'Business',
+          entityId: BUSINESS_ID,
+          userId: actorId,
+          description: 'Actualización de configuración del negocio',
+        },
+      }),
+    ]);
     return this.toResponse(business);
   }
 
-  async setLogo(dto: SetBusinessLogoDto): Promise<BusinessResponse> {
+  async setLogo(
+    dto: SetBusinessLogoDto,
+    actorId: string,
+  ): Promise<BusinessResponse> {
     await this.filesService.assertFileType(dto.fileId, FileType.LOGO);
-
-    const updated = await this.db.business.updateMany({
-      where: { id: BUSINESS_ID },
-      data: { logoFileId: dto.fileId },
-    });
-    if (updated.count !== 1) {
-      throw new NotFoundException('La configuracion del negocio no existe');
-    }
-    return this.findSettings();
+    return this.updateLogo(dto.fileId, actorId);
   }
 
-  async removeLogo(): Promise<BusinessResponse> {
-    const updated = await this.db.business.updateMany({
-      where: { id: BUSINESS_ID },
-      data: { logoFileId: null },
+  async removeLogo(actorId: string): Promise<BusinessResponse> {
+    return this.updateLogo(null, actorId);
+  }
+
+  private async updateLogo(
+    logoFileId: string | null,
+    actorId: string,
+  ): Promise<BusinessResponse> {
+    await this.db.$transaction(async (tx) => {
+      const updated = await tx.business.updateMany({
+        where: { id: BUSINESS_ID },
+        data: { logoFileId },
+      });
+      if (updated.count !== 1) {
+        throw new NotFoundException('La configuracion del negocio no existe');
+      }
+      await tx.auditLog.create({
+        data: {
+          action: 'UPDATE',
+          entity: 'Business',
+          entityId: BUSINESS_ID,
+          userId: actorId,
+          description: 'Cambio de logo del negocio',
+          newData: { logoFileId },
+        },
+      });
     });
-    if (updated.count !== 1) {
-      throw new NotFoundException('La configuracion del negocio no existe');
-    }
     return this.findSettings();
   }
 

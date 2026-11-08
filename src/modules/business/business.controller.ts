@@ -1,5 +1,7 @@
 import { UserRole } from '@/generated/prisma/enums';
 import { Auth } from '@/shared/decorators/auth.decorator';
+import { CurrentUser } from '@/shared/decorators/current-user.decorator';
+import type { AuthenticatedUser } from '@/shared/interfaces/authenticated-user.interface';
 import { Body, Controller, Delete, Get, Put } from '@nestjs/common';
 import { SetBusinessLogoDto } from './dto/set-business-logo.dto';
 import { UpsertBusinessDto } from './dto/upsert-business.dto';
@@ -18,19 +20,27 @@ export class BusinessController {
 
   @Put()
   @Auth(UserRole.ADMIN, UserRole.MANAGER)
-  upsert(@Body() dto: UpsertBusinessDto): Promise<BusinessResponse> {
-    return this.businessService.upsert(dto);
+  upsert(
+    @Body() dto: UpsertBusinessDto,
+    @CurrentUser() actor: AuthenticatedUser,
+  ): Promise<BusinessResponse> {
+    return this.businessService.upsert(dto, actor.id);
   }
 
   @Put('logo')
   @Auth(UserRole.ADMIN, UserRole.MANAGER)
-  setLogo(@Body() dto: SetBusinessLogoDto): Promise<BusinessResponse> {
-    return this.businessService.setLogo(dto);
+  setLogo(
+    @Body() dto: SetBusinessLogoDto,
+    @CurrentUser() actor: AuthenticatedUser,
+  ): Promise<BusinessResponse> {
+    return this.businessService.setLogo(dto, actor.id);
   }
 
   @Delete('logo')
   @Auth(UserRole.ADMIN, UserRole.MANAGER)
-  removeLogo(): Promise<BusinessResponse> {
-    return this.businessService.removeLogo();
+  removeLogo(
+    @CurrentUser() actor: AuthenticatedUser,
+  ): Promise<BusinessResponse> {
+    return this.businessService.removeLogo(actor.id);
   }
 }

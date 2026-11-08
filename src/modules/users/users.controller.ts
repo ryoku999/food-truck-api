@@ -9,6 +9,8 @@ import {
 } from '@nestjs/common';
 import { UserRole } from '@/generated/prisma/enums';
 import { Auth } from '@/shared/decorators/auth.decorator';
+import { CurrentUser } from '@/shared/decorators/current-user.decorator';
+import type { AuthenticatedUser } from '@/shared/interfaces/authenticated-user.interface';
 import { CreateUserDto } from './dto/create-user.dto';
 import { AdminChangePasswordDto } from './dto/admin-change-password.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -28,8 +30,11 @@ export class UsersController {
 
   @Post()
   @Auth(UserRole.ADMIN)
-  create(@Body() dto: CreateUserDto): Promise<UserResponse> {
-    return this.usersService.create(dto);
+  create(
+    @Body() dto: CreateUserDto,
+    @CurrentUser() actor: AuthenticatedUser,
+  ): Promise<UserResponse> {
+    return this.usersService.create(dto, actor.id);
   }
 
   @Get()
@@ -49,8 +54,9 @@ export class UsersController {
   update(
     @Param() params: UserIdParamDto,
     @Body() dto: UpdateUserDto,
+    @CurrentUser() actor: AuthenticatedUser,
   ): Promise<UserResponse> {
-    return this.usersService.update(params, dto);
+    return this.usersService.update(params, dto, actor.id);
   }
 
   @Patch(':id/status')
@@ -58,8 +64,9 @@ export class UsersController {
   updateStatus(
     @Param() params: UserIdParamDto,
     @Body() dto: UpdateUserStatusDto,
+    @CurrentUser() actor: AuthenticatedUser,
   ): Promise<UserResponse> {
-    return this.usersService.updateStatus(params, dto);
+    return this.usersService.updateStatus(params, dto, actor.id);
   }
 
   @Patch(':id/password')

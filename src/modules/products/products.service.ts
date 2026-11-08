@@ -264,6 +264,7 @@ export class ProductsService {
   async update(
     params: ProductIdParamDto,
     dto: UpdateProductDto,
+    actorId: string,
   ): Promise<ProductDetailResponse> {
     this.ensureBody(dto);
     if (dto.categoryId !== undefined || dto.productionAreaId !== undefined) {
@@ -279,12 +280,35 @@ export class ProductsService {
           : dto.productionAreaId,
       );
     }
-    const updated = await this.db.product.updateMany({
-      where: { id: params.id },
-      data: dto,
-    });
-    if (updated.count !== 1)
-      throw new NotFoundException('Producto no encontrado');
+    await this.db.$transaction(
+      async (tx) => {
+        const where = { id: params.id };
+        const previous = await tx.product.findUnique({
+          where,
+          select: { basePrice: true },
+        });
+        if (!previous) throw new NotFoundException('Producto no encontrado');
+        const updated = await tx.product.update({
+          where,
+          data: dto,
+          select: { basePrice: true },
+        });
+        if (!previous.basePrice.equals(updated.basePrice)) {
+          await tx.auditLog.create({
+            data: {
+              action: 'UPDATE',
+              entity: 'Product',
+              entityId: params.id,
+              userId: actorId,
+              description: 'Cambio de precio base',
+              oldData: { basePrice: previous.basePrice.toFixed(2) },
+              newData: { basePrice: updated.basePrice.toFixed(2) },
+            },
+          });
+        }
+      },
+      { isolationLevel: 'Serializable' },
+    );
     return this.findOne(params);
   }
 
