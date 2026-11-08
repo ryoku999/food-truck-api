@@ -23,6 +23,7 @@ import { ProductionQueueModule } from './modules/production-queue/production-que
 import { RealtimeModule } from './modules/realtime/realtime.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { CashRegistersModule } from './modules/cash-registers/cash-registers.module';
+import { PrintingModule } from './modules/printing/printing.module';
 
 @Module({
   imports: [
@@ -58,6 +59,7 @@ import { CashRegistersModule } from './modules/cash-registers/cash-registers.mod
     RealtimeModule,
     PaymentsModule,
     CashRegistersModule,
+    PrintingModule,
   ],
   controllers: [AppController],
   providers: [
