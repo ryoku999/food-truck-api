@@ -9,7 +9,14 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Client as MinioClient } from 'minio';
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  HeadBucketCommand,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { randomUUID } from 'node:crypto';
 import { FileIdParamDto } from './dto/file-id-param.dto';
 import { UploadImageDto } from './dto/upload-image.dto';
@@ -36,7 +43,7 @@ type SupportedImage = {
 @Injectable()
 export class FilesService implements OnModuleInit {
   private readonly logger = new Logger(FilesService.name);
-  private readonly minio: MinioClient;
+  private readonly storage: S3Client;
   private readonly businessBucket: string;
   private readonly productsBucket: string;
   private readonly urlExpirySeconds: number;
@@ -46,35 +53,44 @@ export class FilesService implements OnModuleInit {
     private readonly db: DatabaseService,
     configService: ConfigService,
   ) {
-    this.minio = new MinioClient({
-      endPoint: configService.getOrThrow<string>('MINIO_ENDPOINT'),
-      port: configService.getOrThrow<number>('MINIO_PORT'),
-      useSSL: configService.getOrThrow<boolean>('MINIO_USE_SSL'),
-      accessKey: configService.getOrThrow<string>('MINIO_ROOT_USER'),
-      secretKey: configService.getOrThrow<string>('MINIO_ROOT_PASSWORD'),
+    this.storage = new S3Client({
+      endpoint: configService.getOrThrow<string>('RUSTFS_PUBLIC_ENDPOINT'),
+      region: configService.getOrThrow<string>('RUSTFS_REGION'),
+      forcePathStyle: true,
+      credentials: {
+        accessKeyId: configService.getOrThrow<string>('RUSTFS_ACCESS_KEY'),
+        secretAccessKey: configService.getOrThrow<string>('RUSTFS_SECRET_KEY'),
+      },
     });
     this.businessBucket = configService.getOrThrow<string>(
-      'MINIO_BUSINESS_BUCKET',
+      'RUSTFS_BUSINESS_BUCKET',
     );
     this.productsBucket = configService.getOrThrow<string>(
-      'MINIO_PRODUCTS_BUCKET',
+      'RUSTFS_PRODUCTS_BUCKET',
     );
     this.urlExpirySeconds = configService.getOrThrow<number>(
-      'MINIO_PRESIGNED_URL_EXPIRY_SECONDS',
+      'RUSTFS_PRESIGNED_URL_EXPIRY_SECONDS',
     );
     this.maxImageSize = configService.getOrThrow<number>(
-      'MINIO_MAX_IMAGE_SIZE',
+      'RUSTFS_MAX_IMAGE_SIZE',
     );
   }
 
   async onModuleInit(): Promise<void> {
     for (const bucket of [this.businessBucket, this.productsBucket]) {
-      if (!(await this.minio.bucketExists(bucket))) {
-        throw new Error(`El bucket de MinIO '${bucket}' no existe`);
+      try {
+        await this.storage.send(new HeadBucketCommand({ Bucket: bucket }));
+      } catch (cause) {
+        throw new Error(
+          `No se pudo verificar el bucket de RustFS '${bucket}'`,
+          {
+            cause,
+          },
+        );
       }
     }
 
-    this.logger.log('Conexion con MinIO y buckets verificados');
+    this.logger.log('Conexion con RustFS y buckets verificados');
   }
 
   async uploadImage(
@@ -106,9 +122,15 @@ export class FilesService implements OnModuleInit {
       `${randomUUID()}.${detected.extension}`,
     ].join('/');
 
-    await this.minio.putObject(bucket, objectKey, file.buffer, file.size, {
-      'Content-Type': detected.mimeType,
-    });
+    await this.storage.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: objectKey,
+        Body: file.buffer,
+        ContentType: detected.mimeType,
+        ContentLength: file.size,
+      }),
+    );
 
     try {
       return await this.db.file.create({
@@ -123,7 +145,7 @@ export class FilesService implements OnModuleInit {
         select: FILE_SELECT,
       });
     } catch (error: unknown) {
-      await this.minio.removeObject(bucket, objectKey).catch(() => undefined);
+      await this.deleteObject(bucket, objectKey).catch(() => undefined);
       throw error;
     }
   }
@@ -140,13 +162,8 @@ export class FilesService implements OnModuleInit {
   }
 
   async getUrl(params: FileIdParamDto): Promise<FileUrlResponse> {
-    const file = await this.getStoredFile(params.id);
     return {
-      url: await this.minio.presignedGetObject(
-        file.bucket,
-        file.objectKey,
-        this.urlExpirySeconds,
-      ),
+      url: await this.createPresignedUrl(params.id),
       expiresInSeconds: this.urlExpirySeconds,
     };
   }
@@ -176,7 +193,7 @@ export class FilesService implements OnModuleInit {
       );
     }
 
-    await this.minio.removeObject(file.bucket, file.objectKey);
+    await this.deleteObject(file.bucket, file.objectKey);
     await this.db.file.delete({ where: { id: file.id } });
     return { message: 'Archivo eliminado correctamente' };
   }
@@ -198,10 +215,16 @@ export class FilesService implements OnModuleInit {
 
   async createPresignedUrl(fileId: string): Promise<string> {
     const file = await this.getStoredFile(fileId);
-    return this.minio.presignedGetObject(
-      file.bucket,
-      file.objectKey,
-      this.urlExpirySeconds,
+    return getSignedUrl(
+      this.storage,
+      new GetObjectCommand({ Bucket: file.bucket, Key: file.objectKey }),
+      { expiresIn: this.urlExpirySeconds },
+    );
+  }
+
+  private deleteObject(bucket: string, key: string) {
+    return this.storage.send(
+      new DeleteObjectCommand({ Bucket: bucket, Key: key }),
     );
   }
 

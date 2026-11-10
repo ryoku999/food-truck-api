@@ -21,20 +21,28 @@ export const envSchema = z.object({
   JWT_SECRET: z.string(),
   JWT_ISSUER: z.string(),
   JWT_AUDIENCE: z.string(),
-  MINIO_ROOT_USER: z.string().min(1),
-  MINIO_ROOT_PASSWORD: z.string().min(8),
-  MINIO_ENDPOINT: z.string().min(1),
-  MINIO_PORT: z.coerce.number().int().positive(),
-  MINIO_USE_SSL: z
-    .enum(['true', 'false'])
-    .transform((value) => value === 'true'),
-  MINIO_BUSINESS_BUCKET: z.string().min(3),
-  MINIO_PRODUCTS_BUCKET: z.string().min(3),
-  MINIO_PRESIGNED_URL_EXPIRY_SECONDS: z.coerce
+  RUSTFS_ACCESS_KEY: z.string().min(1),
+  RUSTFS_SECRET_KEY: z.string().min(8),
+  RUSTFS_REGION: z.string().min(1).default('us-east-1'),
+  RUSTFS_PUBLIC_ENDPOINT: z.url().refine((value) => {
+    const endpoint = URL.parse(value);
+    return (
+      endpoint !== null &&
+      ['http:', 'https:'].includes(endpoint.protocol) &&
+      endpoint.pathname === '/' &&
+      !endpoint.username &&
+      !endpoint.password &&
+      !endpoint.search &&
+      !endpoint.hash
+    );
+  }, 'Debe ser una URL HTTP(S) del servicio S3, sin ruta ni credenciales'),
+  RUSTFS_BUSINESS_BUCKET: z.string().min(3).default('business'),
+  RUSTFS_PRODUCTS_BUCKET: z.string().min(3).default('products'),
+  RUSTFS_PRESIGNED_URL_EXPIRY_SECONDS: z.coerce
     .number()
     .int()
     .min(60)
     .max(604800)
     .default(900),
-  MINIO_MAX_IMAGE_SIZE: z.coerce.number().int().positive().default(5_242_880),
+  RUSTFS_MAX_IMAGE_SIZE: z.coerce.number().int().positive().default(5_242_880),
 });

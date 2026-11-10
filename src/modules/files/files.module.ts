@@ -10,7 +10,7 @@ import { ConfigService } from '@nestjs/config';
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => ({
         limits: {
-          fileSize: configService.getOrThrow<number>('MINIO_MAX_IMAGE_SIZE'),
+          fileSize: configService.getOrThrow<number>('RUSTFS_MAX_IMAGE_SIZE'),
           files: 1,
         },
       }),
