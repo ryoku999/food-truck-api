@@ -349,30 +349,52 @@ export class PrintingService {
   ) {
     return this.db.$transaction(
       async (tx) => {
-        const part = await tx.billPart.findUnique({
+        const row = await tx.billPart.findUnique({
           where: { id: partId, orderId },
-          include: {
-            order: { select: { number: true, status: true } },
-            items: {
-              include: {
-                orderItem: {
-                  select: {
-                    productNameSnapshot: true,
-                    variantNameSnapshot: true,
-                  },
-                },
-              },
-              orderBy: { orderItemId: 'asc' },
-            },
-            payments: {
-              where: { status: 'COMPLETED' },
-              include: { paymentMethod: true },
-              orderBy: [{ paidAt: 'asc' }, { id: 'asc' }],
-            },
+        });
+        if (!row)
+          throw new NotFoundException('Parte no encontrada en este pedido');
+        const order = await tx.order.findUniqueOrThrow({
+          where: { id: orderId },
+          select: { number: true, status: true },
+        });
+        const items = await tx.billPartItem.findMany({
+          where: { billPartId: partId },
+          orderBy: { orderItemId: 'asc' },
+        });
+        const orderItems = await tx.orderItem.findMany({
+          where: { id: { in: items.map(({ orderItemId }) => orderItemId) } },
+          select: {
+            id: true,
+            productNameSnapshot: true,
+            variantNameSnapshot: true,
           },
         });
-        if (!part)
-          throw new NotFoundException('Parte no encontrada en este pedido');
+        const payments = await tx.payment.findMany({
+          where: { billPartId: partId, status: 'COMPLETED' },
+          orderBy: [{ paidAt: 'asc' }, { id: 'asc' }],
+        });
+        const methods = await tx.paymentMethod.findMany({
+          where: {
+            id: { in: payments.map(({ paymentMethodId }) => paymentMethodId) },
+          },
+        });
+        const itemById = new Map(orderItems.map((item) => [item.id, item]));
+        const methodById = new Map(
+          methods.map((method) => [method.id, method]),
+        );
+        const part = {
+          ...row,
+          order,
+          items: items.map((item) => ({
+            ...item,
+            orderItem: itemById.get(item.orderItemId)!,
+          })),
+          payments: payments.map((payment) => ({
+            ...payment,
+            paymentMethod: methodById.get(payment.paymentMethodId)!,
+          })),
+        };
         const paid = part.payments.reduce(
           (total, payment) => total.add(payment.amount),
           new Prisma.Decimal(0),

@@ -77,44 +77,45 @@ export class PaymentsService {
   ): Promise<PaymentResponse> {
     const paymentId = await this.db.$transaction(
       async (tx) => {
-        const [order, method] = await Promise.all([
-          tx.order.findUnique({
-            where: { id: params.id },
-            select: {
-              id: true,
-              number: true,
-              status: true,
-              total: true,
-              tables: { select: { tableId: true } },
-              billParts: { select: { id: true, total: true } },
-              payments: {
-                where: { status: PaymentStatus.COMPLETED },
-                select: { amount: true, billPartId: true },
-              },
-            },
-          }),
-          tx.paymentMethod.findUnique({
-            where: { id: dto.paymentMethodId },
-            select: { id: true, code: true, name: true, active: true },
-          }),
-        ]);
-        if (!order) throw new NotFoundException('Pedido no encontrado');
+        const row = await tx.order.findUnique({
+          where: { id: params.id },
+          select: { id: true, number: true, status: true, total: true },
+        });
+        if (!row) throw new NotFoundException('Pedido no encontrado');
+        const method = await tx.paymentMethod.findUnique({
+          where: { id: dto.paymentMethodId },
+          select: { id: true, code: true, name: true, active: true },
+        });
         if (!method)
           throw new NotFoundException('Metodo de pago no encontrado');
         if (!method.active) {
           throw new ConflictException('El metodo de pago esta inactivo');
         }
         if (
-          order.status === OrderStatus.DRAFT ||
-          order.status === OrderStatus.CANCELLED
+          row.status === OrderStatus.DRAFT ||
+          row.status === OrderStatus.CANCELLED
         ) {
           throw new ConflictException(
             'El pedido no esta listo para recibir pagos',
           );
         }
-        if (order.status === OrderStatus.PAID) {
+        if (row.status === OrderStatus.PAID) {
           throw new ConflictException('El pedido ya esta pagado');
         }
+
+        const tables = await tx.orderTable.findMany({
+          where: { orderId: row.id },
+          select: { tableId: true },
+        });
+        const billParts = await tx.billPart.findMany({
+          where: { orderId: row.id },
+          select: { id: true, total: true },
+        });
+        const payments = await tx.payment.findMany({
+          where: { orderId: row.id, status: PaymentStatus.COMPLETED },
+          select: { amount: true, billPartId: true },
+        });
+        const order = { ...row, tables, billParts, payments };
 
         const amount = new Prisma.Decimal(dto.amount);
         const cash = method.code === PaymentMethodCode.CASH;

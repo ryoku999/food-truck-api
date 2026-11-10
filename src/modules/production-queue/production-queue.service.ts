@@ -140,16 +140,92 @@ export class ProductionQueueService {
           }
         : {}),
     };
-    const [items, total] = await this.db.$transaction([
-      this.db.orderItem.findMany({
-        where,
-        select: QUEUE_ITEM_SELECT,
-        orderBy: [{ sentAt: 'asc' }, { createdAt: 'asc' }],
-        skip: (query.page - 1) * query.pageSize,
-        take: query.pageSize,
-      }),
-      this.db.orderItem.count({ where }),
-    ]);
+    const [items, total] = await this.db.$transaction<
+      [QueueItemRecord[], number]
+    >(
+      async (tx) => {
+        const { order, modifiers, comboSelections, ...fields } =
+          QUEUE_ITEM_SELECT;
+        const rows = await tx.orderItem.findMany({
+          where,
+          select: fields,
+          orderBy: [{ sentAt: 'asc' }, { createdAt: 'asc' }],
+          skip: (query.page - 1) * query.pageSize,
+          take: query.pageSize,
+        });
+        const total = await tx.orderItem.count({ where });
+        if (!rows.length) return [[], total];
+
+        const orderIds = [...new Set(rows.map(({ orderId }) => orderId))];
+        const itemIds = rows.map(({ id }) => id);
+        const orders = await tx.order.findMany({
+          where: { id: { in: orderIds } },
+          select: { id: true, number: true, status: true },
+        });
+        const links = await tx.orderTable.findMany({
+          where: { orderId: { in: orderIds } },
+          select: { orderId: true, tableId: true },
+        });
+        const { diningArea, ...tableFields } =
+          order.select.tables.select.table.select;
+        const tables = await tx.table.findMany({
+          where: { id: { in: links.map(({ tableId }) => tableId) } },
+          select: { ...tableFields, diningAreaId: true },
+        });
+        const areas = await tx.diningArea.findMany({
+          where: { id: { in: tables.map(({ diningAreaId }) => diningAreaId) } },
+          select: { id: true, ...diningArea.select },
+        });
+        const itemModifiers = await tx.orderItemModifier.findMany({
+          where: { orderItemId: { in: itemIds } },
+          select: { orderItemId: true, ...modifiers.select },
+        });
+        const itemCombos = await tx.orderItemComboSelection.findMany({
+          where: { orderItemId: { in: itemIds } },
+          select: { orderItemId: true, ...comboSelections.select },
+        });
+        const areaById = new Map(areas.map(({ id, name }) => [id, { name }]));
+        const tableById = new Map(
+          tables.map(({ id, name, number, diningAreaId }) => [
+            id,
+            { id, name, number, diningArea: areaById.get(diningAreaId)! },
+          ]),
+        );
+        const orderById = new Map(
+          orders.map(({ id, number, status }) => [
+            id,
+            {
+              number,
+              status,
+              tables: links
+                .filter((link) => link.orderId === id)
+                .map(({ tableId }) => ({ table: tableById.get(tableId)! })),
+            },
+          ]),
+        );
+        return [
+          rows.map((row) => ({
+            ...row,
+            order: orderById.get(row.orderId)!,
+            modifiers: itemModifiers
+              .filter((item) => item.orderItemId === row.id)
+              .map(({ groupNameSnapshot, optionNameSnapshot, quantity }) => ({
+                groupNameSnapshot,
+                optionNameSnapshot,
+                quantity,
+              })),
+            comboSelections: itemCombos
+              .filter((item) => item.orderItemId === row.id)
+              .map(({ groupNameSnapshot, productNameSnapshot }) => ({
+                groupNameSnapshot,
+                productNameSnapshot,
+              })),
+          })),
+          total,
+        ];
+      },
+      { isolationLevel: 'RepeatableRead' },
+    );
     return {
       items: items.map((item) => this.toResponse(item)),
       meta: {

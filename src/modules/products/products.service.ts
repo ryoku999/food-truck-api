@@ -140,6 +140,17 @@ type ProductRecord = Prisma.ProductGetPayload<{
   select: typeof PRODUCT_SELECT;
 }>;
 
+function groupBy<T>(rows: T[], keyOf: (row: T) => string): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const row of rows) {
+    const key = keyOf(row);
+    const group = groups.get(key);
+    if (group) group.push(row);
+    else groups.set(key, [row]);
+  }
+  return groups;
+}
+
 @Injectable()
 export class ProductsService {
   constructor(
@@ -174,16 +185,162 @@ export class ProductsService {
           }
         : {}),
     };
-    const [items, total] = await this.db.$transaction([
-      this.db.product.findMany({
-        where,
-        select: PRODUCT_SELECT,
-        orderBy: { [query.sortBy]: query.sortOrder },
-        skip: (query.page - 1) * query.pageSize,
-        take: query.pageSize,
-      }),
-      this.db.product.count({ where }),
-    ]);
+    const [items, total] = await this.db.$transaction<
+      [ProductRecord[], number]
+    >(
+      async (tx) => {
+        const {
+          category,
+          productionArea,
+          images,
+          variants,
+          modifierGroups,
+          comboGroups,
+          ...fields
+        } = PRODUCT_SELECT;
+        const products = await tx.product.findMany({
+          where,
+          select: { ...fields, categoryId: true, productionAreaId: true },
+          orderBy: { [query.sortBy]: query.sortOrder },
+          skip: (query.page - 1) * query.pageSize,
+          take: query.pageSize,
+        });
+        const total = await tx.product.count({ where });
+        if (!products.length) return [[], total];
+
+        const productIds = products.map(({ id }) => id);
+        const categories = await tx.category.findMany({
+          where: { id: { in: products.map(({ categoryId }) => categoryId) } },
+          select: category.select,
+        });
+        const areas = await tx.productionArea.findMany({
+          where: {
+            id: {
+              in: products.flatMap(
+                ({ productionAreaId }) => productionAreaId ?? [],
+              ),
+            },
+          },
+          select: productionArea.select,
+        });
+        const { file, ...imageFields } = images.select;
+        const productImages = await tx.productImage.findMany({
+          where: { productId: { in: productIds } },
+          select: { ...imageFields, productId: true },
+          orderBy: images.orderBy,
+        });
+        const files = await tx.file.findMany({
+          where: { id: { in: productImages.map(({ fileId }) => fileId) } },
+          select: { id: true, ...file.select },
+        });
+        const productVariants = await tx.productVariant.findMany({
+          where: { productId: { in: productIds } },
+          ...variants,
+        });
+        const groupLinks = await tx.productModifierGroup.findMany({
+          where: { productId: { in: productIds } },
+          select: { productId: true, modifierGroupId: true, sortOrder: true },
+          orderBy: modifierGroups.orderBy,
+        });
+        const { options, ...modifierFields } =
+          modifierGroups.select.modifierGroup.select;
+        const modifierIds = groupLinks.map(
+          ({ modifierGroupId }) => modifierGroupId,
+        );
+        const groups = await tx.modifierGroup.findMany({
+          where: { id: { in: modifierIds } },
+          select: modifierFields,
+        });
+        const groupOptions = await tx.modifierOption.findMany({
+          where: { modifierGroupId: { in: modifierIds } },
+          select: { ...options.select, modifierGroupId: true },
+          orderBy: options.orderBy,
+        });
+        const { items: comboItems, ...comboFields } = comboGroups.select;
+        const combos = await tx.comboGroup.findMany({
+          where: { comboProductId: { in: productIds } },
+          select: comboFields,
+          orderBy: comboGroups.orderBy,
+        });
+        const components = await tx.comboGroupItem.findMany({
+          where: { comboGroupId: { in: combos.map(({ id }) => id) } },
+          select: { ...comboItems.select, comboGroupId: true },
+          orderBy: comboItems.orderBy,
+        });
+
+        const categoryById = new Map(categories.map((row) => [row.id, row]));
+        const areaById = new Map(areas.map((row) => [row.id, row]));
+        const fileById = new Map(files.map(({ id, ...row }) => [id, row]));
+        const imagesByProduct = groupBy(productImages, (row) => row.productId);
+        const variantsByProduct = groupBy(
+          productVariants,
+          (row) => row.productId,
+        );
+        const linksByProduct = groupBy(groupLinks, (row) => row.productId);
+        const optionsByGroup = groupBy(
+          groupOptions,
+          (row) => row.modifierGroupId,
+        );
+        const modifierById = new Map(
+          groups.map((row) => [
+            row.id,
+            {
+              ...row,
+              options: (optionsByGroup.get(row.id) ?? []).map(
+                ({ modifierGroupId, ...option }) => {
+                  void modifierGroupId;
+                  return option;
+                },
+              ),
+            },
+          ]),
+        );
+        const combosByProduct = groupBy(combos, (row) => row.comboProductId);
+        const componentsByCombo = groupBy(
+          components,
+          (row) => row.comboGroupId,
+        );
+
+        const items: ProductRecord[] = products.map(
+          ({ categoryId, productionAreaId, ...product }) => ({
+            ...product,
+            category: categoryById.get(categoryId)!,
+            productionArea: productionAreaId
+              ? (areaById.get(productionAreaId) ?? null)
+              : null,
+            images: (imagesByProduct.get(product.id) ?? []).map(
+              ({ productId, ...image }) => {
+                void productId;
+                return {
+                  ...image,
+                  file: fileById.get(image.fileId)!,
+                };
+              },
+            ),
+            variants: variantsByProduct.get(product.id) ?? [],
+            modifierGroups: (linksByProduct.get(product.id) ?? []).map(
+              ({ modifierGroupId, sortOrder }) => ({
+                sortOrder,
+                modifierGroup: modifierById.get(modifierGroupId)!,
+              }),
+            ),
+            comboGroups: (combosByProduct.get(product.id) ?? []).map(
+              (group) => ({
+                ...group,
+                items: (componentsByCombo.get(group.id) ?? []).map(
+                  ({ comboGroupId, ...item }) => {
+                    void comboGroupId;
+                    return item;
+                  },
+                ),
+              }),
+            ),
+          }),
+        );
+        return [items, total];
+      },
+      { isolationLevel: 'RepeatableRead' },
+    );
     return {
       items: await Promise.all(items.map((item) => this.toResponse(item))),
       meta: {

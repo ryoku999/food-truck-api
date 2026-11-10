@@ -47,7 +47,12 @@ export class BillPartsService {
   constructor(private readonly db: DatabaseService) {}
 
   async list(orderId: string) {
-    return this.response(await this.find(this.db, orderId));
+    const order = await this.db.order.findUnique({
+      where: { id: orderId },
+      select: BILL_SELECT,
+    });
+    if (!order) throw new NotFoundException('Pedido no encontrado');
+    return this.response(order);
   }
 
   async create(orderId: string, dto: CreateBillPartDto, userId: string) {
@@ -163,12 +168,54 @@ export class BillPartsService {
   }
 
   private async find(db: Prisma.TransactionClient, id: string) {
-    const order = await db.order.findUnique({
-      where: { id },
-      select: BILL_SELECT,
-    });
+    const { items, billParts, payments, ...fields } = BILL_SELECT;
+    const order = await db.order.findUnique({ where: { id }, select: fields });
     if (!order) throw new NotFoundException('Pedido no encontrado');
-    return order;
+    const orderItems = await db.orderItem.findMany({
+      ...items,
+      where: { ...items.where, orderId: id },
+    });
+    const {
+      items: partItems,
+      payments: partPayments,
+      ...partFields
+    } = billParts.select;
+    const parts = await db.billPart.findMany({
+      where: { orderId: id },
+      select: partFields,
+      orderBy: billParts.orderBy,
+    });
+    const partIds = parts.map((part) => part.id);
+    const allocations = await db.billPartItem.findMany({
+      where: { billPartId: { in: partIds } },
+      select: { ...partItems.select, billPartId: true },
+    });
+    const allocatedPayments = await db.payment.findMany({
+      where: { billPartId: { in: partIds } },
+      select: { ...partPayments.select, billPartId: true },
+    });
+    const unallocatedPayments = await db.payment.findMany({
+      ...payments,
+      where: { ...payments.where, orderId: id },
+    });
+    return {
+      ...order,
+      items: orderItems,
+      billParts: parts.map((part) => ({
+        ...part,
+        items: allocations
+          .filter((row) => row.billPartId === part.id)
+          .map(({ orderItemId, quantity, amount }) => ({
+            orderItemId,
+            quantity,
+            amount,
+          })),
+        payments: allocatedPayments
+          .filter((row) => row.billPartId === part.id)
+          .map(({ amount, status }) => ({ amount, status })),
+      })),
+      payments: unallocatedPayments,
+    };
   }
 
   private ensureEditable(order: Bill) {

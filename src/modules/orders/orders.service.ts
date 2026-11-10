@@ -211,7 +211,7 @@ export class OrdersService {
           }
         : {}),
     };
-    const [records, total] = await this.db.$transaction([
+    const [records, total] = await Promise.all([
       this.db.order.findMany({
         where,
         select: ORDER_SELECT,
