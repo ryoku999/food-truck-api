@@ -2,12 +2,10 @@ import { DatabaseService } from '@/database/database.service';
 import { UserRole, UserStatus } from '@/generated/prisma/enums';
 import type { AuthenticatedUser } from '@/shared/interfaces/authenticated-user.interface';
 import type { JwtPayload } from '@/shared/interfaces/jwt-payload.interface';
-import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import {
   OnGatewayConnection,
-  OnGatewayDisconnect,
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
@@ -32,10 +30,7 @@ export type OperationsSocket = Socket<
 >;
 
 @WebSocketGateway({ namespace: '/operations' })
-export class OperationsGateway
-  implements OnGatewayConnection, OnGatewayDisconnect
-{
-  private readonly logger = new Logger(OperationsGateway.name);
+export class OperationsGateway implements OnGatewayConnection {
   private readonly accessCookieName: string;
   private readonly jwtSecret: string;
   private readonly jwtIssuer: string;
@@ -106,11 +101,6 @@ export class OperationsGateway
       });
       client.disconnect(true);
     }
-  }
-
-  handleDisconnect(client: OperationsSocket): void {
-    const userId = client.data.user?.id;
-    if (userId) this.logger.debug(`Socket desconectado para usuario ${userId}`);
   }
 
   private readCookie(
