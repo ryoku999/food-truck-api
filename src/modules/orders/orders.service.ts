@@ -186,6 +186,14 @@ export class OrdersService {
     const numericSearch = query.search ? Number(query.search) : Number.NaN;
     const where: Prisma.OrderWhereInput = {
       status: query.status,
+      ...(query.view && {
+        AND: {
+          status:
+            query.view === 'active'
+              ? { notIn: [OrderStatus.PAID, OrderStatus.CANCELLED] }
+              : { in: [OrderStatus.PAID, OrderStatus.CANCELLED] },
+        },
+      }),
       type: query.type,
       createdById: query.createdById,
       ...(query.tableId

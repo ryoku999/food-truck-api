@@ -57,8 +57,15 @@ export class OrdersController {
 
   @Get()
   @Auth(...OPERATIONAL_ROLES)
-  findAll(@Query() query: OrderQueryDto): Promise<PaginatedOrdersResponse> {
-    return this.ordersService.findAll(query);
+  findAll(
+    @Query() query: OrderQueryDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<PaginatedOrdersResponse> {
+    return this.ordersService.findAll(
+      user.userRole === UserRole.WAITER
+        ? { ...query, createdById: user.id }
+        : query,
+    );
   }
 
   @Get(':id')

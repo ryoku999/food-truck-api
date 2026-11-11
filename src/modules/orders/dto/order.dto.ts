@@ -88,6 +88,10 @@ export class CancelOrderDto {
 
 export class OrderQueryDto {
   @IsOptional()
+  @IsIn(['active', 'history'])
+  view?: 'active' | 'history';
+
+  @IsOptional()
   @IsEnum(OrderStatus)
   status?: OrderStatus;
 
