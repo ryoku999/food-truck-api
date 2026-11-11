@@ -44,6 +44,7 @@ export interface OrderItemResponse {
   status: OrderItemStatus;
   productionArea: ProductionAreaCode;
   sentAt: Date | null;
+  roundNumber: number | null;
   preparingAt: Date | null;
   readyAt: Date | null;
   servedAt: Date | null;

@@ -1,3 +1,4 @@
+import { orderRoundNumbers } from '@/shared/utils/order-rounds';
 import { DatabaseService } from '@/database/database.service';
 import { ensureOrderUnbilled } from '@/modules/payments/ensure-order-unbilled';
 import { Prisma } from '@/generated/prisma/client';
@@ -81,7 +82,7 @@ const QUEUE_ITEM_SELECT = {
 
 type QueueItemRecord = Prisma.OrderItemGetPayload<{
   select: typeof QUEUE_ITEM_SELECT;
-}>;
+}> & { roundNumber?: number | null };
 
 const ALLOWED_TRANSITIONS: Record<OrderItemStatus, OrderItemStatus[]> = {
   [OrderItemStatus.DRAFT]: [],
@@ -158,6 +159,7 @@ export class ProductionQueueService {
 
         const orderIds = [...new Set(rows.map(({ orderId }) => orderId))];
         const itemIds = rows.map(({ id }) => id);
+        const rounds = await this.roundNumbers(tx, orderIds);
         const orders = await tx.order.findMany({
           where: { id: { in: orderIds } },
           select: { id: true, number: true, status: true },
@@ -206,6 +208,10 @@ export class ProductionQueueService {
         return [
           rows.map((row) => ({
             ...row,
+            roundNumber: row.sentAt
+              ? (rounds.get(`${row.orderId}:${row.sentAt.toISOString()}`) ??
+                null)
+              : null,
             order: orderById.get(row.orderId)!,
             modifiers: itemModifiers
               .filter((item) => item.orderItemId === row.id)
@@ -351,7 +357,22 @@ export class ProductionQueueService {
       select: QUEUE_ITEM_SELECT,
     });
     if (!item) throw new NotFoundException('Item de produccion no encontrado');
-    return this.toResponse(item);
+    const rounds = await this.roundNumbers(this.db, [item.orderId]);
+    return this.toResponse({
+      ...item,
+      roundNumber: item.sentAt
+        ? (rounds.get(`${item.orderId}:${item.sentAt.toISOString()}`) ?? null)
+        : null,
+    });
+  }
+
+  private async roundNumbers(db: Prisma.TransactionClient, orderIds: string[]) {
+    const sends = await db.orderItem.groupBy({
+      by: ['orderId', 'sentAt'],
+      where: { orderId: { in: orderIds }, sentAt: { not: null } },
+      orderBy: { sentAt: 'asc' },
+    });
+    return orderRoundNumbers(sends);
   }
 
   private async synchronizeOrder(
@@ -457,6 +478,7 @@ export class ProductionQueueService {
     const startedAt = item.sentAt ?? item.createdAt;
     return {
       ...data,
+      roundNumber: item.roundNumber ?? null,
       orderNumber: order.number,
       orderStatus: order.status,
       tables: order.tables.map(({ table }) => ({

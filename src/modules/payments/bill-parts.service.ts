@@ -71,6 +71,14 @@ export class BillPartsService {
     dto: CreateBillPartDto,
     userId: string,
   ) {
+    const pendingItems = await tx.orderItem.count({
+      where: { orderId: orderId, status: 'DRAFT' },
+    });
+    if (pendingItems)
+      throw new ConflictException(
+        'Envía los productos nuevos a producción antes de cobrar o dividir la cuenta',
+      );
+
     const order = await this.find(tx, orderId);
     this.ensureEditable(order);
     if (order.payments.length)

@@ -1,3 +1,4 @@
+import { orderRoundNumbers } from '@/shared/utils/order-rounds';
 import { DatabaseService } from '@/database/database.service';
 import { ensureOrderUnbilled } from '@/modules/payments/ensure-order-unbilled';
 import { Prisma } from '@/generated/prisma/client';
@@ -302,19 +303,23 @@ export class OrdersService {
     dto: AddOrderItemDto,
     user: AuthenticatedUser,
   ): Promise<OrderDetailResponse> {
-    await this.db.$transaction(async (tx) => {
-      const order = await tx.order.findUnique({
-        where: { id: params.id },
-        select: { status: true },
-      });
-      if (!order) throw new NotFoundException('Pedido no encontrado');
-      this.ensureDraft(order.status);
-      const itemData = await this.buildItemData(tx, dto, user.id);
-      await tx.orderItem.create({
-        data: { orderId: params.id, ...itemData },
-      });
-      await this.recalculateTotals(tx, params.id);
-    });
+    await this.db.$transaction(
+      async (tx) => {
+        const order = await tx.order.findUnique({
+          where: { id: params.id },
+          select: { status: true },
+        });
+        if (!order) throw new NotFoundException('Pedido no encontrado');
+        this.ensureOpenOrder(order.status);
+
+        const itemData = await this.buildItemData(tx, dto, user.id);
+        await tx.orderItem.create({
+          data: { orderId: params.id, ...itemData },
+        });
+        await this.recalculateTotals(tx, params.id);
+      },
+      { isolationLevel: 'Serializable' },
+    );
     return this.findOne(params);
   }
 
@@ -323,44 +328,123 @@ export class OrdersService {
     dto: UpdateDraftOrderItemDto,
   ): Promise<OrderDetailResponse> {
     this.ensureBody(dto);
-    await this.db.$transaction(async (tx) => {
-      const item = await tx.orderItem.findFirst({
-        where: { id: params.itemId, orderId: params.id },
-        select: {
-          id: true,
-          quantity: true,
-          unitPrice: true,
-          modifiersPrice: true,
-          order: { select: { status: true } },
-        },
-      });
-      if (!item) throw new NotFoundException('Item de pedido no encontrado');
-      this.ensureDraft(item.order.status);
-      const quantity = dto.quantity ?? item.quantity;
-      await tx.orderItem.update({
-        where: { id: item.id },
-        data: {
-          quantity,
-          notes: dto.notes,
-          subtotal: item.unitPrice.add(item.modifiersPrice).mul(quantity),
-        },
-      });
-      await this.recalculateTotals(tx, params.id);
-    });
+    await this.db.$transaction(
+      async (tx) => {
+        const item = await tx.orderItem.findFirst({
+          where: { id: params.itemId, orderId: params.id },
+        });
+        if (!item) throw new NotFoundException('Item de pedido no encontrado');
+        const order = await tx.order.findUniqueOrThrow({
+          where: { id: params.id },
+          select: { status: true },
+        });
+        this.ensureOpenOrder(order.status);
+        this.ensureDraft(item.status);
+
+        const quantity = dto.quantity ?? item.quantity;
+        const changesConfiguration =
+          dto.productVariantId !== undefined ||
+          dto.modifierOptionIds !== undefined ||
+          dto.comboSelections !== undefined;
+        if (changesConfiguration) {
+          if (!item.productId)
+            throw new ConflictException('El producto ya no existe');
+          const modifiers = await tx.orderItemModifier.findMany({
+            where: { orderItemId: item.id },
+          });
+          const combos = await tx.orderItemComboSelection.findMany({
+            where: { orderItemId: item.id },
+          });
+          const comboItems = await tx.comboGroupItem.findMany({
+            where: {
+              id: { in: combos.flatMap((row) => row.comboGroupItemId ?? []) },
+            },
+            select: { id: true, comboGroupId: true },
+          });
+          const selections = new Map<string, string[]>();
+          for (const combo of comboItems) {
+            selections.set(combo.comboGroupId, [
+              ...(selections.get(combo.comboGroupId) ?? []),
+              combo.id,
+            ]);
+          }
+          const data = await this.buildItemData(
+            tx,
+            {
+              productId: item.productId,
+              productVariantId:
+                dto.productVariantId === undefined
+                  ? (item.productVariantId ?? undefined)
+                  : (dto.productVariantId ?? undefined),
+              quantity,
+              notes:
+                dto.notes === undefined
+                  ? (item.notes ?? undefined)
+                  : (dto.notes ?? undefined),
+              modifierOptionIds:
+                dto.modifierOptionIds ??
+                modifiers.flatMap((row) => row.modifierOptionId ?? []),
+              comboSelections:
+                dto.comboSelections ??
+                [...selections].map(([comboGroupId, comboGroupItemIds]) => ({
+                  comboGroupId,
+                  comboGroupItemIds,
+                })),
+            },
+            item.createdById,
+          );
+          await tx.orderItemModifier.deleteMany({
+            where: { orderItemId: item.id },
+          });
+          await tx.orderItemComboSelection.deleteMany({
+            where: { orderItemId: item.id },
+          });
+          await tx.orderItem.update({
+            where: { id: item.id },
+            data: {
+              ...data,
+              productVariantId: data.productVariantId ?? null,
+              variantNameSnapshot: data.variantNameSnapshot ?? null,
+              notes: dto.notes === undefined ? item.notes : dto.notes,
+            },
+          });
+        } else {
+          await tx.orderItem.update({
+            where: { id: item.id },
+            data: {
+              quantity,
+              notes: dto.notes,
+              subtotal: item.unitPrice.add(item.modifiersPrice).mul(quantity),
+            },
+          });
+        }
+        await this.recalculateTotals(tx, params.id);
+      },
+      { isolationLevel: 'Serializable' },
+    );
     return this.findOne({ id: params.id });
   }
 
   async removeItem(params: OrderItemParamDto): Promise<OrderDetailResponse> {
-    await this.db.$transaction(async (tx) => {
-      const item = await tx.orderItem.findFirst({
-        where: { id: params.itemId, orderId: params.id },
-        select: { id: true, order: { select: { status: true } } },
-      });
-      if (!item) throw new NotFoundException('Item de pedido no encontrado');
-      this.ensureDraft(item.order.status);
-      await tx.orderItem.delete({ where: { id: item.id } });
-      await this.recalculateTotals(tx, params.id);
-    });
+    await this.db.$transaction(
+      async (tx) => {
+        const item = await tx.orderItem.findFirst({
+          where: { id: params.itemId, orderId: params.id },
+          select: {
+            id: true,
+            status: true,
+            order: { select: { status: true } },
+          },
+        });
+        if (!item) throw new NotFoundException('Item de pedido no encontrado');
+        this.ensureOpenOrder(item.order.status);
+        this.ensureDraft(item.status);
+
+        await tx.orderItem.delete({ where: { id: item.id } });
+        await this.recalculateTotals(tx, params.id);
+      },
+      { isolationLevel: 'Serializable' },
+    );
     return this.findOne({ id: params.id });
   }
 
@@ -369,7 +453,7 @@ export class OrdersService {
     dto: SendOrderDto,
     user: AuthenticatedUser,
   ): Promise<OrderDetailResponse> {
-    await this.db.$transaction(
+    const sentIds = await this.db.$transaction(
       async (tx) => {
         const order = await tx.order.findUnique({
           where: { id: params.id },
@@ -379,6 +463,7 @@ export class OrdersService {
             type: true,
             status: true,
             notes: true,
+            sentAt: true,
             tables: { select: { tableId: true } },
             items: {
               where: { status: OrderItemStatus.DRAFT },
@@ -397,11 +482,10 @@ export class OrdersService {
           },
         });
         if (!order) throw new NotFoundException('Pedido no encontrado');
-        this.ensureDraft(order.status);
+        this.ensureOpenOrder(order.status);
+
         if (order.items.length === 0) {
-          throw new BadRequestException(
-            'El pedido debe tener al menos un item',
-          );
+          throw new BadRequestException('No hay productos nuevos para enviar');
         }
         this.validateTablesForType(
           order.type,
@@ -410,14 +494,20 @@ export class OrdersService {
         await this.validateItemsAvailability(tx, order.items);
         const now = new Date();
         await tx.orderItem.updateMany({
-          where: { orderId: order.id, status: OrderItemStatus.DRAFT },
+          where: {
+            id: { in: order.items.map((item) => item.id) },
+            status: OrderItemStatus.DRAFT,
+          },
           data: { status: OrderItemStatus.PENDING, sentAt: now },
         });
         await tx.order.update({
           where: { id: order.id },
           data: {
-            status: OrderStatus.SENT,
-            sentAt: now,
+            status:
+              order.status === OrderStatus.IN_PROGRESS
+                ? OrderStatus.IN_PROGRESS
+                : OrderStatus.SENT,
+            sentAt: order.sentAt ?? now,
             notes: dto.notes ?? order.notes,
           },
         });
@@ -427,22 +517,25 @@ export class OrdersService {
             data: { status: TableStatus.OCCUPIED },
           });
         }
-        await this.createPrintJobs(tx, order);
+        await this.createPrintJobs(tx, order, now);
         await tx.auditLog.create({
           data: {
             userId: user.id,
             action: AuditAction.UPDATE,
             entity: 'Order',
             entityId: order.id,
-            description: `Pedido #${order.number} enviado a produccion`,
+            description: `Pedido #${order.number}: ${order.items.length} líneas nuevas enviadas a produccion`,
           },
         });
+        return order.items.map((item) => item.id);
       },
       { isolationLevel: 'Serializable' },
     );
     const response = await this.findOne(params);
     this.operationsEvents.emitOrderSent(response);
-    for (const item of response.items) {
+    for (const item of response.items.filter((item) =>
+      sentIds.includes(item.id),
+    )) {
       if (item.productionArea === ProductionAreaCode.KITCHEN) {
         this.operationsEvents.emitKitchenItemCreated(item);
       } else if (item.productionArea === ProductionAreaCode.BAR) {
@@ -457,7 +550,10 @@ export class OrdersService {
       });
     }
     const printJobs = await this.db.printJob.findMany({
-      where: { orderId: response.id },
+      where: {
+        orderId: response.id,
+        items: { some: { orderItemId: { in: sentIds } } },
+      },
       select: {
         id: true,
         printerId: true,
@@ -562,26 +658,24 @@ export class OrdersService {
     dto: CancelOrderItemDto,
     user: AuthenticatedUser,
   ): Promise<OrderDetailResponse> {
-    await this.db.$transaction(
+    const cancelledItemId = await this.db.$transaction(
       async (tx) => {
         const item = await tx.orderItem.findFirst({
           where: { id: params.itemId, orderId: params.id },
-          select: {
-            id: true,
-            status: true,
-            productNameSnapshot: true,
-            order: { select: { status: true } },
-          },
         });
         if (!item) throw new NotFoundException('Item de pedido no encontrado');
-        if (item.order.status === OrderStatus.DRAFT) {
+        const order = await tx.order.findUniqueOrThrow({
+          where: { id: params.id },
+          select: { status: true },
+        });
+        if (order.status === OrderStatus.DRAFT) {
           throw new ConflictException(
             'Mientras el pedido esta en borrador el item debe editarse o eliminarse',
           );
         }
         if (
-          item.order.status === OrderStatus.PAID ||
-          item.order.status === OrderStatus.CANCELLED
+          order.status === OrderStatus.PAID ||
+          order.status === OrderStatus.CANCELLED
         ) {
           throw new ConflictException('El pedido ya esta cerrado');
         }
@@ -592,31 +686,103 @@ export class OrdersService {
           throw new ConflictException('El item ya no puede cancelarse');
         }
         await ensureOrderUnbilled(tx, params.id);
-        await tx.orderItem.update({
-          where: { id: item.id },
-          data: {
-            status: OrderItemStatus.CANCELLED,
-            cancelledAt: new Date(),
-            cancelledById: user.id,
-            cancellationReason: dto.reason,
-          },
-        });
+        const quantity = dto.quantity ?? item.quantity;
+        if (quantity > item.quantity) {
+          throw new BadRequestException(
+            'La cantidad a cancelar supera las unidades del producto',
+          );
+        }
+        const cancelledAt = new Date();
+        let cancelledItemId = item.id;
+        if (quantity === item.quantity) {
+          await tx.orderItem.update({
+            where: { id: item.id },
+            data: {
+              status: OrderItemStatus.CANCELLED,
+              cancelledAt,
+              cancelledById: user.id,
+              cancellationReason: dto.reason,
+            },
+          });
+        } else {
+          const modifiers = await tx.orderItemModifier.findMany({
+            where: { orderItemId: item.id },
+          });
+          const combos = await tx.orderItemComboSelection.findMany({
+            where: { orderItemId: item.id },
+          });
+          const unitTotal = item.unitPrice.add(item.modifiersPrice);
+          await tx.orderItem.update({
+            where: { id: item.id },
+            data: {
+              quantity: item.quantity - quantity,
+              subtotal: unitTotal.mul(item.quantity - quantity),
+            },
+          });
+          const cancelled = await tx.orderItem.create({
+            data: {
+              orderId: item.orderId,
+              productId: item.productId,
+              productVariantId: item.productVariantId,
+              productNameSnapshot: item.productNameSnapshot,
+              variantNameSnapshot: item.variantNameSnapshot,
+              quantity,
+              unitPrice: item.unitPrice,
+              modifiersPrice: item.modifiersPrice,
+              subtotal: unitTotal.mul(quantity),
+              notes: item.notes,
+              productionArea: item.productionArea,
+              sentAt: item.sentAt,
+              preparingAt: item.preparingAt,
+              readyAt: item.readyAt,
+              createdById: item.createdById,
+              status: OrderItemStatus.CANCELLED,
+              cancelledAt,
+              cancelledById: user.id,
+              cancellationReason: dto.reason,
+            },
+          });
+          cancelledItemId = cancelled.id;
+          if (modifiers.length)
+            await tx.orderItemModifier.createMany({
+              data: modifiers.map((option) => ({
+                orderItemId: cancelled.id,
+                modifierOptionId: option.modifierOptionId,
+                groupNameSnapshot: option.groupNameSnapshot,
+                optionNameSnapshot: option.optionNameSnapshot,
+                priceDelta: option.priceDelta,
+                quantity: option.quantity,
+              })),
+            });
+          if (combos.length)
+            await tx.orderItemComboSelection.createMany({
+              data: combos.map((option) => ({
+                orderItemId: cancelled.id,
+                comboGroupItemId: option.comboGroupItemId,
+                groupNameSnapshot: option.groupNameSnapshot,
+                productNameSnapshot: option.productNameSnapshot,
+                additionalPrice: option.additionalPrice,
+              })),
+            });
+        }
         await this.recalculateTotals(tx, params.id);
         await tx.auditLog.create({
           data: {
             userId: user.id,
             action: AuditAction.CANCEL,
             entity: 'OrderItem',
-            entityId: item.id,
-            description: `${item.productNameSnapshot} cancelado: ${dto.reason}`,
+            entityId: cancelledItemId,
+            description: `${quantity} de ${item.quantity} unidades de ${item.productNameSnapshot} canceladas (línea ${item.id}): ${dto.reason}`,
           },
         });
+        return cancelledItemId;
       },
       { isolationLevel: 'Serializable' },
     );
     const response = await this.findOne({ id: params.id });
-    const item = response.items.find(({ id }) => id === params.itemId);
-    if (item) {
+    for (const item of response.items.filter(
+      (item) => item.id === params.itemId || item.id === cancelledItemId,
+    )) {
       this.operationsEvents.emitOrderItemStatusChanged(
         item,
         item.productionArea === ProductionAreaCode.KITCHEN
@@ -680,9 +846,9 @@ export class OrdersService {
   private async buildItemData(
     tx: Prisma.TransactionClient,
     dto: AddOrderItemDto,
-    userId: string,
+    userId: string | null,
   ): Promise<Prisma.OrderItemUncheckedCreateWithoutOrderInput> {
-    const product = await tx.product.findUnique({
+    const productQuery = {
       where: { id: dto.productId },
       select: {
         id: true,
@@ -758,8 +924,93 @@ export class OrdersService {
           },
         },
       },
+    } satisfies Prisma.ProductFindUniqueArgs;
+    const {
+      productionArea: areaSelection,
+      category,
+      variants,
+      modifierGroups,
+      comboGroups,
+      ...fields
+    } = productQuery.select;
+    const row = await tx.product.findUnique({
+      where: productQuery.where,
+      select: { ...fields, categoryId: true, productionAreaId: true },
     });
-    if (!product) throw new NotFoundException('Producto no encontrado');
+    if (!row) throw new NotFoundException('Producto no encontrado');
+    const categoryRow = await tx.category.findUniqueOrThrow({
+      where: { id: row.categoryId },
+      select: { active: category.select.active, productionAreaId: true },
+    });
+    const areas = await tx.productionArea.findMany({
+      where: {
+        id: {
+          in: [row.productionAreaId, categoryRow.productionAreaId].filter(
+            (id): id is string => id !== null,
+          ),
+        },
+      },
+      select: { id: true, ...areaSelection.select },
+    });
+    const areaById = new Map(areas.map((area) => [area.id, area]));
+    const productVariants = await tx.productVariant.findMany({
+      ...variants,
+      where: { ...variants.where, productId: row.id },
+    });
+    const links = await tx.productModifierGroup.findMany({
+      where: { productId: row.id },
+      select: { modifierGroupId: true },
+    });
+    const { options, ...groupFields } =
+      modifierGroups.select.modifierGroup.select;
+    const groups = await tx.modifierGroup.findMany({
+      where: { id: { in: links.map((link) => link.modifierGroupId) } },
+      select: groupFields,
+    });
+    const groupOptions = await tx.modifierOption.findMany({
+      where: {
+        ...options.where,
+        modifierGroupId: { in: groups.map((group) => group.id) },
+      },
+      select: { ...options.select, modifierGroupId: true },
+    });
+    const { items, ...comboFields } = comboGroups.select;
+    const combos = await tx.comboGroup.findMany({
+      where: { comboProductId: row.id },
+      select: comboFields,
+    });
+    const components = await tx.comboGroupItem.findMany({
+      where: {
+        ...items.where,
+        comboGroupId: { in: combos.map((group) => group.id) },
+      },
+      select: { ...items.select, comboGroupId: true },
+    });
+    const product = {
+      ...row,
+      productionArea: row.productionAreaId
+        ? areaById.get(row.productionAreaId)
+        : null,
+      category: {
+        ...categoryRow,
+        productionArea: categoryRow.productionAreaId
+          ? areaById.get(categoryRow.productionAreaId)
+          : null,
+      },
+      variants: productVariants,
+      modifierGroups: groups.map((group) => ({
+        modifierGroup: {
+          ...group,
+          options: groupOptions.filter(
+            (option) => option.modifierGroupId === group.id,
+          ),
+        },
+      })),
+      comboGroups: combos.map((group) => ({
+        ...group,
+        items: components.filter((item) => item.comboGroupId === group.id),
+      })),
+    };
     if (
       !product.active ||
       !product.available ||
@@ -952,7 +1203,25 @@ export class OrdersService {
         productionArea: ProductionAreaCode;
       }>;
     },
+    sentAt: Date,
   ): Promise<void> {
+    const sends = await tx.orderItem.groupBy({
+      by: ['orderId', 'sentAt'],
+      where: { orderId: order.id, sentAt: { not: null } },
+    });
+    const roundNumber = orderRoundNumbers(sends).get(
+      `${order.id}:${sentAt.toISOString()}`,
+    )!;
+    const sentTime = new Intl.DateTimeFormat('es-PE', {
+      timeZone: 'America/Lima',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    }).format(sentAt);
     const areas = [...new Set(order.items.map((item) => item.productionArea))];
     const printers = await tx.printer.findMany({
       where: {
@@ -993,6 +1262,17 @@ export class OrdersService {
             payload: {
               orderNumber: order.number,
               productionArea: area,
+              roundNumber,
+              sentAt: sentAt.toISOString(),
+              lines: [
+                `${area} | Pedido #${order.number}`,
+                `Ronda ${roundNumber}${roundNumber > 1 ? ' | Adicional' : ''}`,
+                `Enviada: ${sentTime} | Lima`,
+                ...items.flatMap((item) => [
+                  `${item.quantity} x ${item.productNameSnapshot}`,
+                  ...(item.notes ? ['  ' + item.notes] : []),
+                ]),
+              ],
               items,
             },
             items: {
@@ -1099,7 +1379,13 @@ export class OrdersService {
     return order;
   }
 
-  private ensureDraft(status: OrderStatus): void {
+  private ensureOpenOrder(status: OrderStatus): void {
+    if (status === OrderStatus.PAID || status === OrderStatus.CANCELLED) {
+      throw new ConflictException('El pedido ya esta cerrado');
+    }
+  }
+
+  private ensureDraft(status: OrderStatus | OrderItemStatus): void {
     if (status !== OrderStatus.DRAFT) {
       throw new ConflictException(
         'Solo se puede modificar un pedido en borrador',
@@ -1117,6 +1403,9 @@ export class OrdersService {
 
   private toResponse(order: OrderRecord): OrderDetailResponse {
     const { subtotal, discount, total, tables, items, ...data } = order;
+    const rounds = orderRoundNumbers(
+      items.map((item) => ({ orderId: order.id, sentAt: item.sentAt })),
+    );
     return {
       ...data,
       subtotal: subtotal.toString(),
@@ -1133,6 +1422,9 @@ export class OrdersService {
           ...item
         }) => ({
           ...item,
+          roundNumber: item.sentAt
+            ? (rounds.get(`${order.id}:${item.sentAt.toISOString()}`) ?? null)
+            : null,
           unitPrice: unitPrice.toString(),
           modifiersPrice: modifiersPrice.toString(),
           subtotal: itemSubtotal.toString(),

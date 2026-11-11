@@ -103,6 +103,14 @@ export class PaymentsService {
           throw new ConflictException('El pedido ya esta pagado');
         }
 
+        const pendingItems = await tx.orderItem.count({
+          where: { orderId: row.id, status: 'DRAFT' },
+        });
+        if (pendingItems)
+          throw new ConflictException(
+            'Envía los productos nuevos a producción antes de cobrar o dividir la cuenta',
+          );
+
         const tables = await tx.orderTable.findMany({
           where: { orderId: row.id },
           select: { tableId: true },

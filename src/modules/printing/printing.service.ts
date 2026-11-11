@@ -226,6 +226,167 @@ export class PrintingService {
     });
   }
 
+  async enqueuePrebill(
+    orderId: string,
+    printerId: string | undefined,
+    userId: string,
+    copyId?: string,
+  ) {
+    try {
+      return await this.db.$transaction(
+        async (tx) => {
+          const order = await tx.order.findUnique({ where: { id: orderId } });
+          if (!order) throw new NotFoundException('Pedido no encontrado');
+          if (['DRAFT', 'PAID', 'CANCELLED'].includes(order.status)) {
+            throw new ConflictException(
+              'La precuenta requiere un pedido enviado y abierto',
+            );
+          }
+          const items = await this.ticketItems(tx, {
+            orderId,
+            status: { not: 'CANCELLED' },
+          });
+          if (items.some((item) => item.status === 'DRAFT')) {
+            throw new ConflictException(
+              'Envía los productos nuevos antes de imprimir la precuenta',
+            );
+          }
+          if (!items.length)
+            throw new ConflictException(
+              'El pedido no tiene productos vigentes',
+            );
+          const payments = await tx.payment.findMany({
+            where: { orderId, status: 'COMPLETED' },
+            orderBy: [{ paidAt: 'asc' }, { id: 'asc' }],
+          });
+          const methods = await tx.paymentMethod.findMany({
+            where: {
+              id: { in: payments.map((payment) => payment.paymentMethodId) },
+            },
+          });
+          const links = await tx.orderTable.findMany({
+            where: { orderId },
+            select: { tableId: true },
+          });
+          const tables = await tx.table.findMany({
+            where: { id: { in: links.map((link) => link.tableId) } },
+            orderBy: [{ number: 'asc' }, { id: 'asc' }],
+          });
+          const areas = await tx.diningArea.findMany({
+            where: { id: { in: tables.map((table) => table.diningAreaId) } },
+          });
+          const business = await tx.business.findFirst({
+            orderBy: { createdAt: 'asc' },
+          });
+          const waiter = order.createdById
+            ? await tx.user.findUnique({
+                where: { id: order.createdById },
+                select: { username: true, firstName: true, lastName: true },
+              })
+            : null;
+          const methodById = new Map(
+            methods.map((method) => [method.id, method.name]),
+          );
+          const areaById = new Map(areas.map((area) => [area.id, area.name]));
+          const paid = payments.reduce(
+            (sum, payment) => sum.add(payment.amount),
+            new Prisma.Decimal(0),
+          );
+          const pending = Prisma.Decimal.max(order.total.sub(paid), 0);
+          const lines = [
+            business?.tradeName || business?.name || 'Food Truck',
+            ...(business?.documentNumber ? [business.documentNumber] : []),
+            ...(business?.address ? [business.address] : []),
+            ...(business?.phone ? ['Tel: ' + business.phone] : []),
+            'PRECUENTA',
+            'Pendiente de pago',
+            `Pedido #${order.number}`,
+            ...tables.map(
+              (table) =>
+                `${areaById.get(table.diningAreaId)} - ${table.name || 'Mesa ' + table.number}`,
+            ),
+            ...(waiter
+              ? [
+                  'Mozo: ' +
+                    ([waiter.firstName, waiter.lastName]
+                      .filter(Boolean)
+                      .join(' ') || waiter.username),
+                ]
+              : []),
+            ...(order.customerName ? ['Cliente: ' + order.customerName] : []),
+            '--------------------------------',
+            ...items.flatMap((item) => this.ticketItemLines(item)),
+            '--------------------------------',
+            `Subtotal: S/ ${order.subtotal.toFixed(2)}`,
+            `Descuento: S/ ${order.discount.toFixed(2)}`,
+            `Total: S/ ${order.total.toFixed(2)}`,
+            ...payments.map(
+              (payment) =>
+                `Abono ${methodById.get(payment.paymentMethodId)}: S/ ${payment.amount.toFixed(2)}`,
+            ),
+            `Abonos: S/ ${paid.toFixed(2)}`,
+            `SALDO PENDIENTE: S/ ${pending.toFixed(2)}`,
+          ];
+          const baseKey = `prebill:${orderId}:${hash(
+            JSON.stringify({
+              lines,
+              items: items.map((item) => item.id),
+              payments: payments.map((payment) => payment.id),
+            }),
+          )}`;
+          const documentKey = copyId ? `${baseKey}:${copyId}` : baseKey;
+          const requested = await tx.printJob.findUnique({
+            where: { documentKey },
+          });
+          if (requested) return requested;
+          const unfinished = await tx.printJob.findFirst({
+            where: {
+              documentKey: { startsWith: baseKey },
+              status: { in: ['PENDING', 'PROCESSING', 'FAILED'] },
+            },
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          });
+          if (unfinished) return unfinished;
+          const generatedAt = new Date();
+          const time = new Intl.DateTimeFormat('es-PE', {
+            timeZone: 'America/Lima',
+            dateStyle: 'short',
+            timeStyle: 'medium',
+            hourCycle: 'h23',
+          }).format(generatedAt);
+          return this.enqueueDocument(tx, {
+            documentKey,
+            orderId,
+            printerId,
+            userId,
+            type: 'PREBILL',
+            itemIds: items.map((item) => item.id),
+            lines: [
+              ...lines.slice(
+                0,
+                lines.indexOf('--------------------------------'),
+              ),
+              `Emitida: ${time} | Lima`,
+              ...lines.slice(lines.indexOf('--------------------------------')),
+              'Pedido abierto - cuenta informativa',
+            ],
+          });
+        },
+        { isolationLevel: 'Serializable' },
+      );
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        ['P2002', 'P2034'].includes(error.code)
+      ) {
+        throw new ConflictException(
+          'La cuenta cambió durante la impresión. Actualiza la cola y vuelve a intentarlo',
+        );
+      }
+      throw error;
+    }
+  }
+
   async enqueue(
     printerId: string | undefined,
     userId: string,
@@ -245,17 +406,37 @@ export class PrintingService {
         throw new NotFoundException(
           'No hay una impresora activa asignada a un agente',
         );
-      const order = orderId
-        ? await tx.order.findUnique({
-            where: { id: orderId },
-            include: {
-              items: { where: { status: { not: 'CANCELLED' } } },
-              payments: {
-                where: { status: 'COMPLETED' },
-                include: { paymentMethod: true },
-              },
+      const orderRow = orderId
+        ? await tx.order.findUnique({ where: { id: orderId } })
+        : null;
+      const orderItems = orderRow
+        ? await this.ticketItems(tx, {
+            orderId: orderRow.id,
+            status: { not: 'CANCELLED' },
+          })
+        : [];
+      const payments = orderRow
+        ? await tx.payment.findMany({
+            where: { orderId: orderRow.id, status: 'COMPLETED' },
+          })
+        : [];
+      const methods = payments.length
+        ? await tx.paymentMethod.findMany({
+            where: {
+              id: { in: payments.map((payment) => payment.paymentMethodId) },
             },
           })
+        : [];
+      const methodById = new Map(methods.map((method) => [method.id, method]));
+      const order = orderRow
+        ? {
+            ...orderRow,
+            items: orderItems,
+            payments: payments.map((payment) => ({
+              ...payment,
+              paymentMethod: methodById.get(payment.paymentMethodId)!,
+            })),
+          }
         : null;
       if (orderId && !order)
         throw new NotFoundException('Pedido no encontrado');
@@ -267,11 +448,8 @@ export class PrintingService {
       const lines = order
         ? [
             `Pedido #${order.number}`,
-            ...order.items.map(
-              (item) =>
-                `${item.quantity} x ${item.productNameSnapshot}${item.variantNameSnapshot ? ' / ' + item.variantNameSnapshot : ''}  ${item.subtotal.toFixed(2)}`,
-            ),
-            `Total: ${order.total.toFixed(2)}`,
+            ...order.items.flatMap((item) => this.ticketItemLines(item)),
+            `Total: S/ ${order.total.toFixed(2)}`,
             ...order.payments.flatMap(paymentLines),
           ]
         : ['Prueba de impresión', printer.name, message ?? ''];
@@ -362,13 +540,8 @@ export class PrintingService {
           where: { billPartId: partId },
           orderBy: { orderItemId: 'asc' },
         });
-        const orderItems = await tx.orderItem.findMany({
-          where: { id: { in: items.map(({ orderItemId }) => orderItemId) } },
-          select: {
-            id: true,
-            productNameSnapshot: true,
-            variantNameSnapshot: true,
-          },
+        const orderItems = await this.ticketItems(tx, {
+          id: { in: items.map(({ orderItemId }) => orderItemId) },
         });
         const payments = await tx.payment.findMany({
           where: { billPartId: partId, status: 'COMPLETED' },
@@ -419,17 +592,81 @@ export class PrintingService {
           itemIds: part.items.map((item) => item.orderItemId),
           lines: [
             `Pedido #${part.order.number} | ${part.name}`,
-            ...part.items.map(
-              ({ quantity, amount, orderItem }) =>
-                `${quantity} x ${orderItem.productNameSnapshot}${orderItem.variantNameSnapshot ? ' / ' + orderItem.variantNameSnapshot : ''}: ${amount.toFixed(2)}`,
+            ...part.items.flatMap(({ quantity, amount, orderItem }) =>
+              this.ticketItemLines(orderItem, quantity, amount),
             ),
-            `Total de la parte: ${part.total.toFixed(2)}`,
+            `Total de la parte: S/ ${part.total.toFixed(2)}`,
             ...part.payments.flatMap(paymentLines),
           ],
         });
       },
       { isolationLevel: 'Serializable' },
     );
+  }
+
+  private async ticketItems(
+    tx: Prisma.TransactionClient,
+    where: Prisma.OrderItemWhereInput,
+  ) {
+    const items = await tx.orderItem.findMany({
+      where,
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    const ids = items.map((item) => item.id);
+    const modifiers = await tx.orderItemModifier.findMany({
+      where: { orderItemId: { in: ids } },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    const combos = await tx.orderItemComboSelection.findMany({
+      where: { orderItemId: { in: ids } },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    return items.map((item) => ({
+      ...item,
+      modifiers: modifiers.filter((option) => option.orderItemId === item.id),
+      comboSelections: combos.filter(
+        (option) => option.orderItemId === item.id,
+      ),
+    }));
+  }
+
+  private ticketItemLines(
+    item: {
+      productNameSnapshot: string;
+      variantNameSnapshot: string | null;
+      quantity: number;
+      unitPrice: Prisma.Decimal;
+      subtotal: Prisma.Decimal;
+      modifiers: {
+        groupNameSnapshot: string;
+        optionNameSnapshot: string;
+        priceDelta: Prisma.Decimal;
+        quantity: number;
+      }[];
+      comboSelections: {
+        groupNameSnapshot: string;
+        productNameSnapshot: string;
+        additionalPrice: Prisma.Decimal;
+      }[];
+    },
+    quantity = item.quantity,
+    total = item.subtotal,
+  ) {
+    const signed = (amount: Prisma.Decimal) =>
+      `${amount.isNegative() ? '-' : '+'}S/ ${amount.abs().toFixed(2)}`;
+    return [
+      `${quantity} x ${item.productNameSnapshot}${item.variantNameSnapshot ? ' / ' + item.variantNameSnapshot : ''}`,
+      `  Base: S/ ${item.unitPrice.toFixed(2)} c/u`,
+      ...item.modifiers.map(
+        (option) =>
+          `  ${option.groupNameSnapshot}: ${option.quantity > 1 ? option.quantity + ' x ' : ''}${option.optionNameSnapshot} (${signed(option.priceDelta)} c/u)`,
+      ),
+      ...item.comboSelections.map(
+        (option) =>
+          `  ${option.groupNameSnapshot}: ${option.productNameSnapshot} (${signed(option.additionalPrice)} c/u)`,
+      ),
+      `  Total (${quantity}): S/ ${total.toFixed(2)}`,
+    ];
   }
 
   private async enqueueDocument(
@@ -439,7 +676,7 @@ export class PrintingService {
       orderId: string;
       printerId?: string;
       userId: string;
-      type: 'PAYMENT_RECEIPT' | 'PART_TICKET';
+      type: 'PAYMENT_RECEIPT' | 'PART_TICKET' | 'PREBILL';
       lines: string[];
       itemIds?: string[];
     },

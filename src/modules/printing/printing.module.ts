@@ -22,6 +22,7 @@ import {
   PrinterUpdateDto,
   PrintResultDto,
   PrintTicketDto,
+  PrintPrebillDto,
   PartTicketParamsDto,
   TestPrinterDto,
 } from './printing.dto';
@@ -99,6 +100,16 @@ class PrintingController {
   @Auth('CASHIER', 'ADMIN', 'MANAGER')
   retry(@Param() { id }: IdDto, @CurrentUser() user: AuthenticatedUser) {
     return this.service.retry(id, user.id);
+  }
+
+  @Post('orders/:id/print-prebill')
+  @Auth('CASHIER', 'ADMIN', 'MANAGER')
+  prebill(
+    @Param() { id }: IdDto,
+    @Body() dto: PrintPrebillDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.enqueuePrebill(id, dto.printerId, user.id, dto.copyId);
   }
 
   @Post('orders/:id/print-ticket')

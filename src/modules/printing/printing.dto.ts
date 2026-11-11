@@ -62,3 +62,7 @@ export class PrintResultDto {
   @IsOptional() @IsString() @MaxLength(500) error?: string;
   @IsOptional() @IsBoolean() safeToRetry?: boolean;
 }
+
+export class PrintPrebillDto extends PrintTicketDto {
+  @IsOptional() @IsUUID() copyId?: string;
+}

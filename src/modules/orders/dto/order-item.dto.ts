@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayUnique,
@@ -9,6 +9,8 @@ import {
   IsUUID,
   MaxLength,
   Min,
+  MinLength,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 
@@ -58,6 +60,24 @@ export class AddOrderItemDto {
 
 export class UpdateDraftOrderItemDto {
   @IsOptional()
+  @IsUUID()
+  productVariantId?: string | null;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @ArrayMaxSize(50)
+  @IsUUID('4', { each: true })
+  modifierOptionIds?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => ComboSelectionDto)
+  comboSelections?: ComboSelectionDto[];
+
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
@@ -70,7 +90,17 @@ export class UpdateDraftOrderItemDto {
 }
 
 export class CancelOrderItemDto {
+  @ValidateIf((_object, value: unknown) => value !== undefined)
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  quantity?: number;
+
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
   @IsString()
+  @MinLength(1)
   @MaxLength(500)
   reason!: string;
 }
