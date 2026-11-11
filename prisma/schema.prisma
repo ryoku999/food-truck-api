@@ -22,7 +22,7 @@ enum UserStatus {
   INACTIVE
 }
 
-enum RoleCode {
+enum UserRole {
   ADMIN
   MANAGER
   CASHIER
@@ -120,6 +120,9 @@ enum PrintJobType {
   KITCHEN_COMMAND
   BAR_COMMAND
   CUSTOMER_TICKET
+  PREBILL
+  PAYMENT_RECEIPT
+  PART_TICKET
   CASH_REPORT
   TEST
 }
@@ -181,18 +184,6 @@ model Business {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  diningAreas     DiningArea[]
-  productionAreas ProductionArea[]
-  users           User[]
-  categories      Category[]
-  products        Product[]
-  orders          Order[]
-  paymentMethods  PaymentMethod[]
-  cashRegisters   CashRegister[]
-  printers        Printer[]
-  printerAgents   PrinterAgent[]
-  auditLogs       AuditLog[]
-
   @@map("businesses")
 }
 
@@ -203,17 +194,15 @@ model Business {
 model User {
   id String @id @default(uuid()) @db.Uuid
 
-  businessId String   @db.Uuid
-  business   Business @relation(fields: [businessId], references: [id])
-
-  username String
+  username String @unique
+  dni      String @unique @db.VarChar(8)
   password String
 
   firstName String?
   lastName  String?
 
-  role   RoleCode
-  status UserStatus @default(ACTIVE)
+  userRole UserRole
+  status   UserStatus @default(ACTIVE)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -231,11 +220,24 @@ model User {
 
   cashMovements CashMovement[]
 
-  auditLogs AuditLog[]
+  auditLogs     AuditLog[]
+  refreshTokens RefreshToken[]
 
-  @@unique([businessId, username])
-  @@index([businessId, role])
+  @@index([userRole])
   @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  userId    String   @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique @db.VarChar(255)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
 }
 
 // ==========================================================
@@ -270,9 +272,6 @@ model File {
 model DiningArea {
   id String @id @default(uuid()) @db.Uuid
 
-  businessId String   @db.Uuid
-  business   Business @relation(fields: [businessId], references: [id])
-
   name        String
   description String?
 
@@ -284,8 +283,8 @@ model DiningArea {
 
   tables Table[]
 
-  @@unique([businessId, name])
-  @@index([businessId, active])
+  @@unique([name])
+  @@index([active])
   @@map("dining_areas")
 }
 
@@ -322,9 +321,6 @@ model Table {
 model ProductionArea {
   id String @id @default(uuid()) @db.Uuid
 
-  businessId String   @db.Uuid
-  business   Business @relation(fields: [businessId], references: [id])
-
   name String
   code ProductionAreaCode
 
@@ -338,8 +334,8 @@ model ProductionArea {
 
   printers Printer[]
 
-  @@unique([businessId, name])
-  @@index([businessId, code])
+  @@unique([name])
+  @@index([code])
   @@map("production_areas")
 }
 
@@ -349,9 +345,6 @@ model ProductionArea {
 
 model Category {
   id String @id @default(uuid()) @db.Uuid
-
-  businessId String   @db.Uuid
-  business   Business @relation(fields: [businessId], references: [id])
 
   name        String
   description String?
@@ -368,8 +361,8 @@ model Category {
   products Product[]
   images   CategoryImage[]
 
-  @@unique([businessId, name])
-  @@index([businessId, active])
+  @@unique([name])
+  @@index([active])
   @@map("categories")
 }
 
@@ -394,9 +387,6 @@ model CategoryImage {
 
 model Product {
   id String @id @default(uuid()) @db.Uuid
-
-  businessId String   @db.Uuid
-  business   Business @relation(fields: [businessId], references: [id])
 
   categoryId String   @db.Uuid
   category   Category @relation(fields: [categoryId], references: [id])
@@ -429,8 +419,8 @@ model Product {
 
   orderItems OrderItem[]
 
-  @@index([businessId, categoryId])
-  @@index([businessId, active, available])
+  @@index([categoryId])
+  @@index([active, available])
   @@map("products")
 }
 
@@ -631,9 +621,6 @@ model ComboGroupItem {
 model Order {
   id String @id @default(uuid()) @db.Uuid
 
-  businessId String   @db.Uuid
-  business   Business @relation(fields: [businessId], references: [id])
-
   number Int
 
   type   OrderType   @default(DINE_IN)
@@ -665,14 +652,15 @@ model Order {
   tables OrderTable[]
 
   items OrderItem[]
+  billParts BillPart[]
 
   payments Payment[]
 
   printJobs PrintJob[]
 
-  @@unique([businessId, number])
-  @@index([businessId, status])
-  @@index([businessId, openedAt])
+  @@unique([number])
+  @@index([status])
+  @@index([openedAt])
   @@index([createdById])
   @@map("orders")
 }
@@ -754,6 +742,7 @@ model OrderItem {
   comboSelections OrderItemComboSelection[]
 
   printJobItems PrintJobItem[]
+  billPartItems BillPartItem[]
 
   @@index([orderId])
   @@index([orderId, status])
@@ -820,9 +809,6 @@ model OrderItemComboSelection {
 model PaymentMethod {
   id String @id @default(uuid()) @db.Uuid
 
-  businessId String   @db.Uuid
-  business   Business @relation(fields: [businessId], references: [id])
-
   code PaymentMethodCode
   name String
 
@@ -835,7 +821,7 @@ model PaymentMethod {
 
   payments Payment[]
 
-  @@unique([businessId, code])
+  @@unique([code])
   @@map("payment_methods")
 }
 
@@ -861,6 +847,8 @@ model Payment {
   paymentMethod   PaymentMethod @relation(fields: [paymentMethodId], references: [id])
 
   amount Decimal @db.Decimal(10, 2)
+  receivedAmount Decimal? @db.Decimal(10, 2)
+  changeAmount   Decimal? @db.Decimal(10, 2)
 
   status PaymentStatus @default(COMPLETED)
 
@@ -876,11 +864,45 @@ model Payment {
   updatedAt DateTime @updatedAt
 
   cashMovement CashMovement?
+  billPartId String? @db.Uuid
+  billPart BillPart? @relation(fields: [billPartId], references: [id], onDelete: Restrict)
+  pendingAfter Decimal? @db.Decimal(10, 2)
+  cashSessionId String?              @db.Uuid
+  cashSession   CashRegisterSession? @relation(fields: [cashSessionId], references: [id], onDelete: Restrict)
 
   @@index([orderId])
   @@index([paymentMethodId])
   @@index([paidAt])
+  @@index([cashSessionId])
+  @@index([billPartId])
   @@map("payments")
+}
+
+model BillPart {
+  id String @id @default(uuid()) @db.Uuid
+  orderId String @db.Uuid
+  order Order @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  name String
+  total Decimal @db.Decimal(10, 2)
+  createdAt DateTime @default(now())
+  items BillPartItem[]
+  payments Payment[]
+
+  @@index([orderId])
+  @@map("bill_parts")
+}
+
+model BillPartItem {
+  billPartId String @db.Uuid
+  billPart BillPart @relation(fields: [billPartId], references: [id], onDelete: Cascade)
+  orderItemId String @db.Uuid
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  quantity Int
+  amount Decimal @db.Decimal(10, 2)
+
+  @@id([billPartId, orderItemId])
+  @@index([orderItemId])
+  @@map("bill_part_items")
 }
 
 // ==========================================================
@@ -889,9 +911,6 @@ model Payment {
 
 model CashRegister {
   id String @id @default(uuid()) @db.Uuid
-
-  businessId String   @db.Uuid
-  business   Business @relation(fields: [businessId], references: [id])
 
   name String
 
@@ -902,7 +921,7 @@ model CashRegister {
 
   sessions CashRegisterSession[]
 
-  @@unique([businessId, name])
+  @@unique([name])
   @@map("cash_registers")
 }
 
@@ -936,6 +955,7 @@ model CashRegisterSession {
   updatedAt DateTime @updatedAt
 
   movements CashMovement[]
+  payments  Payment[]
 
   @@index([cashRegisterId, status])
   @@index([openedAt])
@@ -977,9 +997,6 @@ model CashMovement {
 model Printer {
   id String @id @default(uuid()) @db.Uuid
 
-  businessId String   @db.Uuid
-  business   Business @relation(fields: [businessId], references: [id])
-
   name String
 
   purpose PrinterPurpose
@@ -1013,7 +1030,7 @@ model Printer {
 
   printJobs PrintJob[]
 
-  @@index([businessId, purpose])
+  @@index([purpose])
   @@index([printerAgentId])
   @@map("printers")
 }
@@ -1026,9 +1043,6 @@ model Printer {
 
 model PrinterAgent {
   id String @id @default(uuid()) @db.Uuid
-
-  businessId String   @db.Uuid
-  business   Business @relation(fields: [businessId], references: [id])
 
   name String
 
@@ -1049,7 +1063,7 @@ model PrinterAgent {
 
   printers Printer[]
 
-  @@index([businessId, active])
+  @@index([active])
   @@map("printer_agents")
 }
 
@@ -1059,6 +1073,7 @@ model PrinterAgent {
 
 model PrintJob {
   id String @id @default(uuid()) @db.Uuid
+  documentKey String? @unique
 
   printerId String  @db.Uuid
   printer   Printer @relation(fields: [printerId], references: [id])
@@ -1115,9 +1130,6 @@ model PrintJobItem {
 model AuditLog {
   id String @id @default(uuid()) @db.Uuid
 
-  businessId String   @db.Uuid
-  business   Business @relation(fields: [businessId], references: [id])
-
   userId String? @db.Uuid
   user   User?   @relation(fields: [userId], references: [id])
 
@@ -1135,7 +1147,7 @@ model AuditLog {
 
   createdAt DateTime @default(now())
 
-  @@index([businessId, createdAt])
+  @@index([createdAt])
   @@index([entity, entityId])
   @@index([userId])
   @@map("audit_logs")
