@@ -9,7 +9,7 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
   AgentCreateDto,
   AgentUpdateDto,
@@ -35,20 +35,70 @@ const readyPrinter = {
 const safeError = 'RETRYABLE: ';
 const hash = (token: string) =>
   createHash('sha256').update(token).digest('hex');
+const separator = '--------------------------------';
+const internalNotice = 'No válido como comprobante de pago';
+const personSelect = {
+  firstName: true,
+  lastName: true,
+  username: true,
+} as const;
+
+function personName(
+  user: Prisma.UserGetPayload<{ select: typeof personSelect }>,
+) {
+  return (
+    [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username
+  );
+}
+
+function documentDate(date: Date) {
+  return new Intl.DateTimeFormat('es-PE', {
+    timeZone: 'America/Lima',
+    dateStyle: 'short',
+    timeStyle: 'medium',
+    hourCycle: 'h23',
+  }).format(date);
+}
+
+function documentPayload(
+  id: string,
+  title: string,
+  header: string[],
+  lines: string[],
+) {
+  return {
+    headerLines: header.length + 1,
+    lines: [
+      ...header,
+      title,
+      `Nro. ${id.replace(/-/g, '').slice(0, 16).toUpperCase()}`,
+      ...lines,
+      separator,
+      internalNotice,
+    ],
+  };
+}
 
 function paymentLines(payment: {
   paymentMethod: { name: string };
   amount: Prisma.Decimal;
   receivedAmount: Prisma.Decimal | null;
   changeAmount: Prisma.Decimal | null;
+  reference: string | null;
+  paidAt: Date;
+  user: Prisma.UserGetPayload<{ select: typeof personSelect }> | null;
 }) {
   return [
-    `${payment.paymentMethod.name}: ${payment.amount.toFixed(2)}`,
-    ...(payment.receivedAmount !== null && payment.changeAmount !== null
-      ? [
-          `  Recibido: ${payment.receivedAmount.toFixed(2)} | Vuelto: ${payment.changeAmount.toFixed(2)}`,
-        ]
+    `${payment.paymentMethod.name}: S/ ${payment.amount.toFixed(2)}`,
+    `  Fecha de pago: ${documentDate(payment.paidAt)}`,
+    ...(payment.user ? [`  Cajero: ${personName(payment.user)}`] : []),
+    ...(payment.receivedAmount !== null
+      ? [`  Recibido: S/ ${payment.receivedAmount.toFixed(2)}`]
       : []),
+    ...(payment.changeAmount !== null
+      ? [`  Vuelto: S/ ${payment.changeAmount.toFixed(2)}`]
+      : []),
+    ...(payment.reference ? [`  Referencia: ${payment.reference}`] : []),
   ];
 }
 
@@ -295,6 +345,11 @@ export class PrintingService {
               id: { in: payments.map((payment) => payment.paymentMethodId) },
             },
           });
+          const parts = await tx.billPart.findMany({
+            where: { orderId },
+            select: { id: true, name: true },
+          });
+          const partById = new Map(parts.map(({ id, name }) => [id, name]));
           const links = await tx.orderTable.findMany({
             where: { orderId },
             select: { tableId: true },
@@ -306,13 +361,11 @@ export class PrintingService {
           const areas = await tx.diningArea.findMany({
             where: { id: { in: tables.map((table) => table.diningAreaId) } },
           });
-          const business = await tx.business.findFirst({
-            orderBy: { createdAt: 'asc' },
-          });
+          const header = await this.restaurantHeader(tx);
           const waiter = order.createdById
             ? await tx.user.findUnique({
                 where: { id: order.createdById },
-                select: { username: true, firstName: true, lastName: true },
+                select: personSelect,
               })
             : null;
           const methodById = new Map(
@@ -325,41 +378,43 @@ export class PrintingService {
           );
           const pending = Prisma.Decimal.max(order.total.sub(paid), 0);
           const lines = [
-            business?.tradeName || business?.name || 'Food Truck',
-            ...(business?.documentNumber ? [business.documentNumber] : []),
-            ...(business?.address ? [business.address] : []),
-            ...(business?.phone ? ['Tel: ' + business.phone] : []),
-            'PRECUENTA',
-            'Pendiente de pago',
             `Pedido #${order.number}`,
             ...tables.map(
               (table) =>
-                `${areaById.get(table.diningAreaId)} - ${table.name || 'Mesa ' + table.number}`,
+                `Mesa ${table.number}${table.name ? ` - ${table.name}` : ''}${areaById.has(table.diningAreaId) ? ` | ${areaById.get(table.diningAreaId)}` : ''}`,
             ),
-            ...(waiter
-              ? [
-                  'Mozo: ' +
-                    ([waiter.firstName, waiter.lastName]
-                      .filter(Boolean)
-                      .join(' ') || waiter.username),
-                ]
-              : []),
+            ...(waiter ? [`Mozo: ${personName(waiter)}`] : []),
             ...(order.customerName ? ['Cliente: ' + order.customerName] : []),
-            '--------------------------------',
-            ...items.flatMap((item) => this.ticketItemLines(item)),
-            '--------------------------------',
+            ...(order.notes ? [`Observaciones: ${order.notes}`] : []),
+            separator,
+            ...items.flatMap((item, index) => [
+              ...(index ? [separator] : []),
+              ...this.ticketItemLines(item),
+            ]),
+            separator,
             `Subtotal: S/ ${order.subtotal.toFixed(2)}`,
             `Descuento: S/ ${order.discount.toFixed(2)}`,
-            `Total: S/ ${order.total.toFixed(2)}`,
-            ...payments.map(
-              (payment) =>
-                `Abono ${methodById.get(payment.paymentMethodId)}: S/ ${payment.amount.toFixed(2)}`,
-            ),
-            `Abonos: S/ ${paid.toFixed(2)}`,
-            `SALDO PENDIENTE: S/ ${pending.toFixed(2)}`,
+            `Total del consumo: S/ ${order.total.toFixed(2)}`,
+            ...(payments.length ? [separator, 'PAGOS REGISTRADOS'] : []),
+            ...payments
+              .map((payment) => {
+                const partName =
+                  payment.billPartId && partById.get(payment.billPartId);
+                const label = payment.billPartId
+                  ? 'Pago por productos'
+                  : 'Abono';
+                return [
+                  `${label} ${methodById.get(payment.paymentMethodId) ?? 'Otro'}: S/ ${payment.amount.toFixed(2)}`,
+                  ...(partName ? [`  Parte: ${partName}`] : []),
+                ];
+              })
+              .flat(),
+            `Total pagado: S/ ${paid.toFixed(2)}`,
+            `TOTAL POR PAGAR: S/ ${pending.toFixed(2)}`,
           ];
           const baseKey = `prebill:${orderId}:${hash(
             JSON.stringify({
+              header,
               lines,
               items: items.map((item) => item.id),
               payments: payments.map((payment) => payment.id),
@@ -378,27 +433,18 @@ export class PrintingService {
             orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
           });
           if (unfinished) return unfinished;
-          const generatedAt = new Date();
-          const time = new Intl.DateTimeFormat('es-PE', {
-            timeZone: 'America/Lima',
-            dateStyle: 'short',
-            timeStyle: 'medium',
-            hourCycle: 'h23',
-          }).format(generatedAt);
           return this.enqueueDocument(tx, {
             documentKey,
             orderId,
             printerId,
             userId,
             type: 'PREBILL',
+            title: 'PRECUENTA',
+            header,
             itemIds: items.map((item) => item.id),
             lines: [
-              ...lines.slice(
-                0,
-                lines.indexOf('--------------------------------'),
-              ),
-              `Emitida: ${time} | Lima`,
-              ...lines.slice(lines.indexOf('--------------------------------')),
+              `Emitida: ${documentDate(new Date())}`,
+              ...lines,
               'Pedido abierto - cuenta informativa',
             ],
           });
@@ -449,6 +495,8 @@ export class PrintingService {
       const payments = orderRow
         ? await tx.payment.findMany({
             where: { orderId: orderRow.id, status: 'COMPLETED' },
+            include: { user: { select: personSelect } },
+            orderBy: [{ paidAt: 'asc' }, { id: 'asc' }],
           })
         : [];
       const methods = payments.length
@@ -476,20 +524,39 @@ export class PrintingService {
           'El ticket general requiere un pedido pagado',
         );
       }
-      const lines = order
-        ? [
-            `Pedido #${order.number}`,
-            ...order.items.flatMap((item) => this.ticketItemLines(item)),
-            `Total: S/ ${order.total.toFixed(2)}`,
-            ...order.payments.flatMap(paymentLines),
-          ]
-        : ['Prueba de impresión', printer.name, message ?? ''];
+      const id = randomUUID();
+      const paidAt = order?.paidAt ?? order?.payments.at(-1)?.paidAt;
+      const payload = order
+        ? documentPayload(
+            id,
+            'TICKET DE PAGO',
+            await this.restaurantHeader(tx),
+            [
+              ...(paidAt ? [`Fecha de pago: ${documentDate(paidAt)}`] : []),
+              ...(await this.orderDocumentLines(tx, order)),
+              separator,
+              ...order.items.flatMap((item, index) => [
+                ...(index ? [separator] : []),
+                ...this.ticketItemLines(item),
+              ]),
+              separator,
+              `Subtotal: S/ ${order.subtotal.toFixed(2)}`,
+              `Descuento: S/ ${order.discount.toFixed(2)}`,
+              `Total de la venta: S/ ${order.total.toFixed(2)}`,
+              separator,
+              ...order.payments.flatMap(paymentLines),
+              'Estado: PAGADO',
+              'Gracias por su visita',
+            ],
+          )
+        : { lines: ['Prueba de impresión', printer.name, message ?? ''] };
       const job = await tx.printJob.create({
         data: {
+          id,
           printerId: printer.id,
           orderId,
           type: order ? PrintJobType.CUSTOMER_TICKET : PrintJobType.TEST,
-          payload: { lines },
+          payload,
           items: {
             create:
               order?.items.map((item) => ({ orderItemId: item.id })) ?? [],
@@ -520,8 +587,9 @@ export class PrintingService {
         const payment = await tx.payment.findUnique({
           where: { id: paymentId },
           include: {
-            order: { select: { number: true, status: true } },
+            order: true,
             paymentMethod: true,
+            user: { select: personSelect },
           },
         });
         if (!payment) throw new NotFoundException('Pago no encontrado');
@@ -539,11 +607,13 @@ export class PrintingService {
           printerId,
           userId,
           type: 'PAYMENT_RECEIPT',
+          title: 'RECIBO DE ABONO',
+          header: await this.restaurantHeader(tx),
           lines: [
-            'Recibo interno de abono',
-            `Pedido #${payment.order.number}`,
+            ...(await this.orderDocumentLines(tx, payment.order)),
+            separator,
             ...paymentLines(payment),
-            `Saldo tras el abono: ${payment.pendingAfter.toFixed(2)}`,
+            `Saldo tras el abono: S/ ${payment.pendingAfter.toFixed(2)}`,
           ],
         });
       },
@@ -566,7 +636,6 @@ export class PrintingService {
           throw new NotFoundException('Parte no encontrada en este pedido');
         const order = await tx.order.findUniqueOrThrow({
           where: { id: orderId },
-          select: { number: true, status: true },
         });
         const items = await tx.billPartItem.findMany({
           where: { billPartId: partId },
@@ -577,6 +646,7 @@ export class PrintingService {
         });
         const payments = await tx.payment.findMany({
           where: { billPartId: partId, status: 'COMPLETED' },
+          include: { user: { select: personSelect } },
           orderBy: [{ paidAt: 'asc' }, { id: 'asc' }],
         });
         const methods = await tx.paymentMethod.findMany({
@@ -615,25 +685,74 @@ export class PrintingService {
             .sort()
             .join(','),
         );
+        const subtotal = part.items.reduce(
+          (sum, { quantity, orderItem }) =>
+            sum.add(
+              orderItem.unitPrice.add(orderItem.modifiersPrice).mul(quantity),
+            ),
+          new Prisma.Decimal(0),
+        );
         return this.enqueueDocument(tx, {
           documentKey: `part:${part.id}:${version}`,
           orderId,
           printerId,
           userId,
           type: 'PART_TICKET',
+          title: 'TICKET DE PAGO',
+          header: await this.restaurantHeader(tx),
           itemIds: part.items.map((item) => item.orderItemId),
           lines: [
-            `Pedido #${part.order.number} | ${part.name}`,
-            ...part.items.flatMap(({ quantity, amount, orderItem }) =>
-              this.ticketItemLines(orderItem, quantity, amount),
-            ),
+            ...(await this.orderDocumentLines(tx, part.order)),
+            `Parte: ${part.name}`,
+            separator,
+            ...part.items.flatMap(({ quantity, amount, orderItem }, index) => [
+              ...(index ? [separator] : []),
+              ...this.ticketItemLines(orderItem, quantity, amount),
+            ]),
+            separator,
+            `Subtotal de la parte: S/ ${subtotal.toFixed(2)}`,
+            `Descuento de la parte: S/ ${subtotal.sub(part.total).toFixed(2)}`,
             `Total de la parte: S/ ${part.total.toFixed(2)}`,
             ...part.payments.flatMap(paymentLines),
+            'Estado de la parte: PAGADO',
           ],
         });
       },
       { isolationLevel: 'Serializable' },
     );
+  }
+
+  private async restaurantHeader(tx: Prisma.TransactionClient) {
+    const business = await tx.business.findFirst({
+      orderBy: { createdAt: 'asc' },
+    });
+    return [
+      business?.tradeName || business?.name || 'Food Truck',
+      ...(business?.documentNumber ? [business.documentNumber] : []),
+      ...(business?.address ? [business.address] : []),
+      ...(business?.phone ? [`Tel: ${business.phone}`] : []),
+    ];
+  }
+
+  private async orderDocumentLines(
+    tx: Prisma.TransactionClient,
+    order: { id: string; number: number; customerName: string | null },
+  ) {
+    const links = await tx.orderTable.findMany({
+      where: { orderId: order.id },
+      select: { tableId: true },
+    });
+    const tables = await tx.table.findMany({
+      where: { id: { in: links.map(({ tableId }) => tableId) } },
+      orderBy: [{ number: 'asc' }, { id: 'asc' }],
+    });
+    return [
+      `Pedido #${order.number}`,
+      ...tables.map(
+        ({ number, name }) => `Mesa ${number}${name ? ` - ${name}` : ''}`,
+      ),
+      ...(order.customerName ? [`Cliente: ${order.customerName}`] : []),
+    ];
   }
 
   private async ticketItems(
@@ -668,7 +787,9 @@ export class PrintingService {
       variantNameSnapshot: string | null;
       quantity: number;
       unitPrice: Prisma.Decimal;
+      modifiersPrice: Prisma.Decimal;
       subtotal: Prisma.Decimal;
+      notes: string | null;
       modifiers: {
         groupNameSnapshot: string;
         optionNameSnapshot: string;
@@ -697,7 +818,13 @@ export class PrintingService {
         (option) =>
           `  ${option.groupNameSnapshot}: ${option.productNameSnapshot} (${signed(option.additionalPrice)} c/u)`,
       ),
+      ...(!item.modifiersPrice.isZero()
+        ? [
+            `  Precio unitario: S/ ${item.unitPrice.add(item.modifiersPrice).toFixed(2)}`,
+          ]
+        : []),
       `  Total (${quantity}): S/ ${total.toFixed(2)}`,
+      ...(item.notes ? [`  Nota: ${item.notes}`] : []),
     ];
   }
 
@@ -709,6 +836,8 @@ export class PrintingService {
       printerId?: string;
       userId: string;
       type: 'PAYMENT_RECEIPT' | 'PART_TICKET' | 'PREBILL';
+      title: string;
+      header: string[];
       lines: string[];
       itemIds?: string[];
     },
@@ -733,13 +862,15 @@ export class PrintingService {
       where: { id: data.orderId },
       data: { updatedAt: new Date() },
     });
+    const id = randomUUID();
     const job = await tx.printJob.create({
       data: {
+        id,
         documentKey: data.documentKey,
         orderId: data.orderId,
         printerId: printer.id,
         type: data.type,
-        payload: { lines: data.lines },
+        payload: documentPayload(id, data.title, data.header, data.lines),
         items: {
           create: data.itemIds?.map((orderItemId) => ({ orderItemId })) ?? [],
         },
