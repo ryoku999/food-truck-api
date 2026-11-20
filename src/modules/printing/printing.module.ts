@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Headers,
   Module,
@@ -10,6 +11,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { Auth } from '@/shared/decorators/auth.decorator';
+import { RealtimeModule } from '@/modules/realtime/realtime.module';
 import { CurrentUser } from '@/shared/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '@/shared/interfaces/authenticated-user.interface';
 import {
@@ -48,6 +50,15 @@ class PrintingController {
   @Auth('ADMIN', 'MANAGER')
   updatePrinter(@Param() { id }: IdDto, @Body() dto: PrinterUpdateDto) {
     return this.service.savePrinter(dto, id);
+  }
+
+  @Delete('printers/:id')
+  @Auth('ADMIN', 'MANAGER')
+  deletePrinter(
+    @Param() { id }: IdDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.deletePrinter(id, user.id);
   }
 
   @Post('printers/:id/test')
@@ -163,6 +174,7 @@ class PrinterWorkerController {
 }
 
 @Module({
+  imports: [RealtimeModule],
   controllers: [PrintingController, PrinterWorkerController],
   providers: [PrintingService],
 })

@@ -15,6 +15,7 @@ import {
 } from '@/generated/prisma/enums';
 import type { AuthenticatedUser } from '@/shared/interfaces/authenticated-user.interface';
 import { OperationsEventsService } from '@/modules/realtime/operations-events.service';
+import { PrinterWorkerEventsService } from '@/modules/realtime/printer-worker-events.service';
 import {
   BadRequestException,
   ConflictException,
@@ -139,6 +140,7 @@ export class OrdersService {
   constructor(
     private readonly db: DatabaseService,
     private readonly operationsEvents: OperationsEventsService,
+    private readonly printerWorkerEvents: PrinterWorkerEventsService,
   ) {}
 
   async create(
@@ -532,6 +534,7 @@ export class OrdersService {
       { isolationLevel: 'Serializable' },
     );
     const response = await this.findOne(params);
+    this.printerWorkerEvents.notifyJobsAvailable();
     this.operationsEvents.emitOrderSent(response);
     for (const item of response.items.filter((item) =>
       sentIds.includes(item.id),

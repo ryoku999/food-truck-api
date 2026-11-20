@@ -1,4 +1,5 @@
 import { DatabaseService } from '@/database/database.service';
+import { PrinterWorkerEventsService } from '@/modules/realtime/printer-worker-events.service';
 import { Prisma } from '@/generated/prisma/client';
 import { PrintJobType } from '@/generated/prisma/enums';
 import {
@@ -53,7 +54,10 @@ function paymentLines(payment: {
 
 @Injectable()
 export class PrintingService {
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly printerWorkerEvents: PrinterWorkerEventsService,
+  ) {}
 
   agents() {
     return this.db.printerAgent
@@ -170,6 +174,33 @@ export class PrintingService {
     return id
       ? this.db.printer.update({ where: { id }, data })
       : this.db.printer.create({ data });
+  }
+
+  async deletePrinter(id: string, userId: string) {
+    return this.db.$transaction(async (tx) => {
+      const printer = await tx.printer.findUnique({
+        where: { id },
+        select: { id: true, name: true },
+      });
+      if (!printer) throw new NotFoundException('Impresora no encontrada');
+      const jobs = await tx.printJob.count({ where: { printerId: id } });
+      if (jobs > 0) {
+        throw new ConflictException(
+          'No se puede borrar una impresora con trabajos históricos; desactívala para conservar el historial',
+        );
+      }
+      await tx.printer.delete({ where: { id } });
+      await tx.auditLog.create({
+        data: {
+          action: 'DELETE',
+          entity: 'Printer',
+          entityId: id,
+          userId,
+          description: `Impresora eliminada: ${printer.name}`,
+        },
+      });
+      return { id, deleted: true };
+    });
   }
 
   async jobs(query: JobQueryDto) {
@@ -474,6 +505,7 @@ export class PrintingService {
           description: job.type,
         },
       });
+      this.printerWorkerEvents.notifyJobsAvailable();
       return job;
     });
   }
@@ -722,6 +754,7 @@ export class PrintingService {
         description: job.type,
       },
     });
+    this.printerWorkerEvents.notifyJobsAvailable();
     return job;
   }
 
