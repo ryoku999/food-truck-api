@@ -68,6 +68,12 @@ export class OrdersController {
     );
   }
 
+  @Get('ready-for-service')
+  @Auth(UserRole.WAITER)
+  readyForService(@CurrentUser() user: AuthenticatedUser) {
+    return this.ordersService.readyForService(user.id);
+  }
+
   @Get(':id')
   @Auth(...OPERATIONAL_ROLES)
   findOne(@Param() params: OrderIdParamDto): Promise<OrderDetailResponse> {

@@ -185,6 +185,39 @@ export class OrdersService {
     return this.findOne({ id: orderId });
   }
 
+  async readyForService(userId: string) {
+    const orders = await this.db.order.findMany({
+      where: {
+        createdById: userId,
+        status: { in: OPEN_STATUSES },
+        items: { some: { status: OrderItemStatus.READY } },
+      },
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+      select: {
+        id: true,
+        number: true,
+        status: true,
+        tables: {
+          select: { table: { select: { id: true, number: true, name: true } } },
+        },
+        items: {
+          where: { status: OrderItemStatus.READY },
+          orderBy: [{ readyAt: 'asc' }, { id: 'asc' }],
+          select: {
+            id: true,
+            productNameSnapshot: true,
+            variantNameSnapshot: true,
+            quantity: true,
+          },
+        },
+      },
+    });
+    return orders.map(({ tables, ...order }) => ({
+      ...order,
+      tables: tables.map(({ table }) => table),
+    }));
+  }
+
   async findAll(query: OrderQueryDto): Promise<PaginatedOrdersResponse> {
     const numericSearch = query.search ? Number(query.search) : Number.NaN;
     const where: Prisma.OrderWhereInput = {
@@ -536,14 +569,20 @@ export class OrdersService {
     const response = await this.findOne(params);
     this.printerWorkerEvents.notifyJobsAvailable();
     this.operationsEvents.emitOrderSent(response);
+    const notifiedAreas = new Set<'KITCHEN' | 'BAR'>();
     for (const item of response.items.filter((item) =>
       sentIds.includes(item.id),
     )) {
       if (item.productionArea === ProductionAreaCode.KITCHEN) {
         this.operationsEvents.emitKitchenItemCreated(item);
+        notifiedAreas.add('KITCHEN');
       } else if (item.productionArea === ProductionAreaCode.BAR) {
         this.operationsEvents.emitBarItemCreated(item);
+        notifiedAreas.add('BAR');
       }
+    }
+    for (const area of notifiedAreas) {
+      this.operationsEvents.emitProductionBatchReceived(area, sentIds[0]);
     }
     for (const table of response.tables) {
       this.operationsEvents.emitTableStatusChanged({

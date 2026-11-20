@@ -33,6 +33,25 @@ export class OperationsEventsService {
     this.emitToRooms(['area:BAR'], OPERATIONS_EVENTS.BAR_ITEM_CREATED, data);
   }
 
+  emitProductionBatchReceived(area: 'KITCHEN' | 'BAR', id: string): void {
+    this.emitToRooms(
+      [`area:${area}`],
+      OPERATIONS_EVENTS.PRODUCTION_BATCH_RECEIVED,
+      { id, area },
+    );
+  }
+
+  emitWaiterItemReady(
+    userId: string,
+    data: { id: string; orderId: string },
+  ): void {
+    this.emitToRooms(
+      [`user:${userId}`],
+      OPERATIONS_EVENTS.WAITER_ITEM_READY,
+      data,
+    );
+  }
+
   emitOrderItemStatusChanged<T>(data: T, area?: 'KITCHEN' | 'BAR'): void {
     const rooms = FRONT_OPERATION_ROLES.map((role) => `role:${role}`);
     if (area) rooms.push(`area:${area}`);
