@@ -40,6 +40,10 @@ const readyPrinter = {
   status: 'ACTIVE',
   printerAgent: { active: true },
 } satisfies Prisma.PrinterWhereInput;
+const cashierPrinter = {
+  ...readyPrinter,
+  purpose: { in: ['CASHIER', 'GENERAL'] },
+} satisfies Prisma.PrinterWhereInput;
 const safeError = 'RETRYABLE: ';
 const hash = (token: string) =>
   createHash('sha256').update(token).digest('hex');
@@ -81,15 +85,19 @@ function documentPayload(
   header: string[],
   lines: string[],
   type: 'CUSTOMER_TICKET' | 'PART_TICKET' | 'PREBILL' | 'PAYMENT_RECEIPT',
+  ticketNumber?: number,
 ) {
   const emphasizeFooter = type === 'CUSTOMER_TICKET' || type === 'PART_TICKET';
+  const reference = ticketNumber === undefined
+    ? id.replace(/-/g, '').slice(0, 16).toUpperCase()
+    : String(ticketNumber).padStart(6, '0');
   return {
     headerLines: header.length + 1,
     emphasizeFooter,
     lines: [
       ...header,
       title,
-      `Nro. ${id.replace(/-/g, '').slice(0, 16).toUpperCase()}`,
+      `Nro. ${reference}`,
       ...lines,
       ...(emphasizeFooter ? [separator, 'Gracias por su visita'] : []),
       ...(type === 'PAYMENT_RECEIPT' ? [separator, internalNotice] : []),
@@ -202,6 +210,9 @@ export class PrintingService {
     const connectionType = dto.connectionType ?? previous?.connectionType;
     const host = dto.host?.trim() ?? previous?.host;
     const systemName = dto.systemName?.trim() ?? previous?.systemName;
+    const fallbackEnabled = dto.fallbackEnabled ?? previous?.fallbackEnabled ?? false;
+    const useNetwork = connectionType === 'NETWORK_TCP' || fallbackEnabled;
+    const useSystem = connectionType === 'SYSTEM_PRINTER' || fallbackEnabled;
     if (
       !name ||
       !purpose ||
@@ -211,9 +222,8 @@ export class PrintingService {
         'Indique nombre, propósito y tipo de conexión',
       );
     if (
-      connectionType === 'NETWORK_TCP'
-        ? !host || /[\s/]/.test(host)
-        : !systemName || systemName.startsWith('-')
+      (useNetwork && (!host || /[\s/]/.test(host))) ||
+      (useSystem && (!systemName || systemName.startsWith('-')))
     )
       throw new BadRequestException('Destino de impresión inválido');
     if (dto.printerAgentId) await this.agentExists(dto.printerAgentId);
@@ -229,14 +239,12 @@ export class PrintingService {
       name,
       purpose,
       connectionType,
+      fallbackEnabled,
       active,
       status: active ? ('ACTIVE' as const) : ('INACTIVE' as const),
-      host: connectionType === 'NETWORK_TCP' ? host : null,
-      port:
-        connectionType === 'NETWORK_TCP'
-          ? (dto.port ?? previous?.port ?? 9100)
-          : null,
-      systemName: connectionType === 'SYSTEM_PRINTER' ? systemName : null,
+      host: useNetwork ? host : null,
+      port: useNetwork ? (dto.port ?? previous?.port ?? 9100) : null,
+      systemName: useSystem ? systemName : null,
       paperWidth: dto.paperWidth ?? undefined,
       printerAgentId: dto.printerAgentId,
       productionAreaId: dto.productionAreaId,
@@ -296,20 +304,52 @@ export class PrintingService {
     return job;
   }
 
-  async retry(id: string, userId: string) {
-    return this.db.$transaction(async (tx) => {
+  async retryPrinters(id: string) {
+    const job = await this.db.printJob.findFirst({
+      where: { id, type: 'PREBILL', status: 'FAILED', error: { startsWith: safeError } },
+      select: { printerId: true },
+    });
+    if (!job) throw new ConflictException('La precuenta no admite un reintento seguro');
+    return this.db.printer.findMany({
+      where: { ...cashierPrinter, id: { not: job.printerId } },
+      select: { id: true, name: true },
+      orderBy: { name: 'asc' },
+    });
+  }
+
+  async retry(id: string, userId: string, printerId?: string) {
+    const job = await this.db.$transaction(async (tx) => {
+      const previous = await tx.printJob.findFirst({
+        where: { id, status: 'FAILED', error: { startsWith: safeError } },
+        select: { printerId: true, type: true, attempts: true, error: true },
+      });
+      if (!previous)
+        throw new ConflictException('El trabajo no admite un reintento seguro');
+      if (printerId) {
+        if (previous.type !== 'PREBILL' || printerId === previous.printerId)
+          throw new BadRequestException('Selecciona otra impresora para la precuenta');
+        const destination = await tx.printer.findFirst({
+          where: { ...cashierPrinter, id: printerId },
+          select: { id: true },
+        });
+        if (!destination)
+          throw new ConflictException('La impresora elegida no está disponible para Caja');
+      }
       const changed = await tx.printJob.updateMany({
         where: {
           id,
           status: 'FAILED',
           error: { startsWith: safeError },
-          printer: readyPrinter,
+          attempts: previous.attempts,
+          printerId: previous.printerId,
+          ...(printerId ? {} : { printer: readyPrinter }),
         },
         data: {
           status: 'PENDING',
           error: null,
           failedAt: null,
           processingAt: null,
+          ...(printerId ? { printerId } : {}),
         },
       });
       if (!changed.count)
@@ -321,10 +361,14 @@ export class PrintingService {
           entityId: id,
           userId,
           description: 'Reintento de impresión',
+          oldData: { printerId: previous.printerId, error: previous.error },
+          newData: { printerId: printerId ?? previous.printerId },
         },
       });
       return tx.printJob.findUniqueOrThrow({ where: { id } });
     });
+    this.printerWorkerEvents.notifyJobsAvailable();
+    return job;
   }
 
   async enqueuePrebill(
@@ -546,6 +590,7 @@ export class PrintingService {
       }
       const id = randomUUID();
       const paidAt = order?.paidAt ?? order?.payments.at(-1)?.paidAt;
+      const fingerprint = order && paymentFingerprint(order.payments);
       const payload = order
         ? documentPayload(
             id,
@@ -568,6 +613,7 @@ export class PrintingService {
               'Estado: PAGADO',
             ],
             'CUSTOMER_TICKET',
+            await this.getPaymentTicketNumber(tx, `order:${order.id}:${fingerprint}`),
           )
         : { lines: ['Prueba de impresión', printer.name, message ?? ''] };
       const job = await tx.printJob.create({
@@ -579,7 +625,7 @@ export class PrintingService {
           payload: order
             ? {
                 ...payload,
-                paymentFingerprint: paymentFingerprint(order.payments),
+                paymentFingerprint: fingerprint!,
               }
             : payload,
           items: {
@@ -651,6 +697,7 @@ export class PrintingService {
     partId: string,
     printerId: string | undefined,
     userId: string,
+    copyId?: string,
   ) {
     return this.db.$transaction(
       async (tx) => {
@@ -704,12 +751,22 @@ export class PrintingService {
             'Completa el pago de esta parte antes de imprimir',
           );
         }
-        const version = hash(
-          part.payments
-            .map((payment) => payment.id)
-            .sort()
-            .join(','),
-        );
+        const version = paymentFingerprint(part.payments);
+        const ticketKey = `part:${part.id}:${version}`;
+        const documentKey = copyId ? `${ticketKey}:${copyId}` : ticketKey;
+        if (copyId) {
+          const requestedCopy = await tx.printJob.findUnique({ where: { documentKey } });
+          if (requestedCopy) return requestedCopy;
+          const previous = await tx.printJob.findFirst({
+            where: {
+              documentKey: { startsWith: ticketKey },
+              status: { in: ['PENDING', 'PROCESSING', 'FAILED'] },
+            },
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          });
+          if (previous) return previous;
+        }
+        const paidAt = part.payments.at(-1)?.paidAt;
         const subtotal = part.items.reduce(
           (sum, { quantity, orderItem }) =>
             sum.add(
@@ -718,16 +775,18 @@ export class PrintingService {
           new Prisma.Decimal(0),
         );
         return this.enqueueDocument(tx, {
-          documentKey: `part:${part.id}:${version}`,
+          documentKey,
           orderId,
           printerId,
           userId,
           type: 'PART_TICKET',
           paymentFingerprint: version,
+          paymentTicketKey: ticketKey,
           title: 'TICKET DE PAGO',
           header: await this.restaurantHeader(tx),
           itemIds: part.items.map((item) => item.orderItemId),
           lines: [
+            ...(paidAt ? [`Pagado el: ${documentDate(paidAt)}`] : []),
             ...(await this.orderDocumentLines(tx, part.order)),
             `Parte: ${part.name}`,
             separator,
@@ -855,6 +914,17 @@ export class PrintingService {
     ];
   }
 
+  private async getPaymentTicketNumber(tx: Prisma.TransactionClient, key: string) {
+    const existing = await tx.paymentTicketNumber.findUnique({ where: { key } });
+    if (existing) return existing.number;
+    const [ticket] = await tx.$queryRaw<{ number: number }[]>`
+      INSERT INTO "payment_ticket_numbers" ("key") VALUES (${key})
+      ON CONFLICT ("key") DO UPDATE SET "key" = EXCLUDED."key"
+      RETURNING "number"
+    `;
+    return ticket.number;
+  }
+
   private async enqueueDocument(
     tx: Prisma.TransactionClient,
     data: {
@@ -868,6 +938,7 @@ export class PrintingService {
       lines: string[];
       itemIds?: string[];
       paymentFingerprint?: string;
+      paymentTicketKey?: string;
     },
   ) {
     const existing = await tx.printJob.findUnique({
@@ -891,6 +962,9 @@ export class PrintingService {
       data: { updatedAt: new Date() },
     });
     const id = randomUUID();
+    const ticketNumber = data.paymentTicketKey
+      ? await this.getPaymentTicketNumber(tx, data.paymentTicketKey)
+      : undefined;
     const job = await tx.printJob.create({
       data: {
         id,
@@ -905,6 +979,7 @@ export class PrintingService {
             data.header,
             data.lines,
             data.type,
+            ticketNumber,
           ),
           ...(data.paymentFingerprint
             ? { paymentFingerprint: data.paymentFingerprint }
@@ -982,7 +1057,8 @@ export class PrintingService {
           billPartId: partId,
           status: 'COMPLETED',
         },
-        select: { id: true },
+        select: { id: true, paidAt: true },
+        orderBy: [{ paidAt: 'asc' }, { id: 'asc' }],
       }),
     ]);
     if (
@@ -994,13 +1070,19 @@ export class PrintingService {
     )
       throw unavailable();
 
-    const logo = await this.files.readBusinessLogo();
-    return {
-      lines: payload.lines.filter(
+    const lines = payload.lines.filter(
         (line): line is string =>
           typeof line === 'string' &&
           !/^\s*(Cliente|Cajero|Referencia|Nota|Observaciones):/i.test(line),
-      ),
+    );
+    const paidAt = payments.at(-1)?.paidAt;
+    const dateIndex = payload.headerLines + 1;
+    if (partId && paidAt && !lines[dateIndex]?.startsWith('Pagado el:')) {
+      lines.splice(dateIndex, 0, `Pagado el: ${documentDate(paidAt)}`);
+    }
+    const logo = await this.files.readBusinessLogo();
+    return {
+      lines,
       headerLines: payload.headerLines,
       logo: logo ? `data:${logo.mimeType};base64,${logo.data}` : null,
     };

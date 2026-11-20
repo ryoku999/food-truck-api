@@ -28,6 +28,7 @@ export class PrinterUpdateDto extends AgentUpdateDto {
   @IsOptional() @IsEnum(PrinterPurpose) purpose?: PrinterPurpose;
   @IsOptional() @IsIn(['NETWORK_TCP', 'SYSTEM_PRINTER']) connectionType?:
     'NETWORK_TCP' | 'SYSTEM_PRINTER';
+  @IsOptional() @IsBoolean() fallbackEnabled?: boolean;
   @IsOptional() @IsString() @MaxLength(253) host?: string;
   @IsOptional() @IsInt() @Min(1) @Max(65535) port?: number;
   @IsOptional() @IsString() @MaxLength(200) systemName?: string;

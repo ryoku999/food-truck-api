@@ -118,8 +118,18 @@ class PrintingController {
 
   @Post('print-jobs/:id/retry')
   @Auth('CASHIER', 'ADMIN', 'MANAGER')
-  retry(@Param() { id }: IdDto, @CurrentUser() user: AuthenticatedUser) {
-    return this.service.retry(id, user.id);
+  retry(
+    @Param() { id }: IdDto,
+    @Body() dto: PrintTicketDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.retry(id, user.id, dto?.printerId);
+  }
+
+  @Get('print-jobs/:id/retry-printers')
+  @Auth('CASHIER', 'ADMIN', 'MANAGER')
+  retryPrinters(@Param() { id }: IdDto) {
+    return this.service.retryPrinters(id);
   }
 
   @Post('orders/:id/print-prebill')
@@ -156,10 +166,10 @@ class PrintingController {
   @Auth('CASHIER', 'ADMIN', 'MANAGER')
   partTicket(
     @Param() { id, partId }: PartTicketParamsDto,
-    @Body() dto: PrintTicketDto,
+    @Body() dto: PrintPrebillDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.service.enqueuePartTicket(id, partId, dto.printerId, user.id);
+    return this.service.enqueuePartTicket(id, partId, dto.printerId, user.id, dto.copyId);
   }
 }
 
