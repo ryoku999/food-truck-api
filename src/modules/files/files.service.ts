@@ -224,7 +224,7 @@ export class FilesService implements OnModuleInit {
     );
   }
 
-  async readBusinessLogo(): Promise<string | undefined> {
+  async readBusinessLogo() {
     try {
       const business = await this.db.business.findUnique({
         where: { id: BUSINESS_ID },
@@ -255,8 +255,12 @@ export class FilesService implements OnModuleInit {
         if (size > limit) return;
         chunks.push(chunk);
       }
-      if (size > 0 && (file.size === null || size === file.size))
-        return Buffer.concat(chunks, size).toString('base64');
+      if (size > 0 && (file.size === null || size === file.size)) {
+        const image = Buffer.concat(chunks, size);
+        const format = this.detectImage(image);
+        if (format)
+          return { data: image.toString('base64'), mimeType: format.mimeType };
+      }
     } catch {
       this.logger.warn('No se pudo cargar el logo para imprimir el ticket');
     }

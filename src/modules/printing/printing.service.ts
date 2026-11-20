@@ -10,7 +10,14 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from 'node:crypto';
+import { ConfigService } from '@nestjs/config';
 import {
   AgentCreateDto,
   AgentUpdateDto,
@@ -38,6 +45,13 @@ const hash = (token: string) =>
   createHash('sha256').update(token).digest('hex');
 const separator = '--------------------------------';
 const internalNotice = 'No válido como comprobante de pago';
+const paymentFingerprint = (payments: { id: string }[]) =>
+  hash(
+    payments
+      .map(({ id }) => id)
+      .sort()
+      .join(','),
+  );
 const personSelect = {
   firstName: true,
   lastName: true,
@@ -112,6 +126,7 @@ export class PrintingService {
     private readonly db: DatabaseService,
     private readonly printerWorkerEvents: PrinterWorkerEventsService,
     private readonly files: FilesService,
+    private readonly config: ConfigService,
   ) {}
 
   agents() {
@@ -561,7 +576,12 @@ export class PrintingService {
           printerId: printer.id,
           orderId,
           type: order ? PrintJobType.CUSTOMER_TICKET : PrintJobType.TEST,
-          payload,
+          payload: order
+            ? {
+                ...payload,
+                paymentFingerprint: paymentFingerprint(order.payments),
+              }
+            : payload,
           items: {
             create:
               order?.items.map((item) => ({ orderItemId: item.id })) ?? [],
@@ -703,6 +723,7 @@ export class PrintingService {
           printerId,
           userId,
           type: 'PART_TICKET',
+          paymentFingerprint: version,
           title: 'TICKET DE PAGO',
           header: await this.restaurantHeader(tx),
           itemIds: part.items.map((item) => item.orderItemId),
@@ -846,6 +867,7 @@ export class PrintingService {
       header: string[];
       lines: string[];
       itemIds?: string[];
+      paymentFingerprint?: string;
     },
   ) {
     const existing = await tx.printJob.findUnique({
@@ -876,13 +898,18 @@ export class PrintingService {
         orderId: data.orderId,
         printerId: printer.id,
         type: data.type,
-        payload: documentPayload(
-          id,
-          data.title,
-          data.header,
-          data.lines,
-          data.type,
-        ),
+        payload: {
+          ...documentPayload(
+            id,
+            data.title,
+            data.header,
+            data.lines,
+            data.type,
+          ),
+          ...(data.paymentFingerprint
+            ? { paymentFingerprint: data.paymentFingerprint }
+            : {}),
+        },
         items: {
           create: data.itemIds?.map((orderItemId) => ({ orderItemId })) ?? [],
         },
@@ -901,6 +928,84 @@ export class PrintingService {
     return job;
   }
 
+  private receiptSignature(id: string) {
+    return createHmac('sha256', this.config.getOrThrow<string>('JWT_SECRET'))
+      .update(`public-payment-ticket:v1:${id}`)
+      .digest('base64url');
+  }
+
+  async publicReceipt(header?: string) {
+    const unavailable = () => new NotFoundException('Ticket no disponible');
+    const match =
+      /^Receipt ([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.([\w-]{43})$/.exec(
+        header ?? '',
+      );
+    if (!match) throw unavailable();
+    const [, id, signature] = match;
+    if (
+      !timingSafeEqual(
+        Buffer.from(signature),
+        Buffer.from(this.receiptSignature(id)),
+      )
+    )
+      throw unavailable();
+
+    const job = await this.db.printJob.findUnique({ where: { id } });
+    if (
+      !job?.orderId ||
+      job.status !== 'PRINTED' ||
+      (job.type !== 'CUSTOMER_TICKET' && job.type !== 'PART_TICKET')
+    )
+      throw unavailable();
+    const payload = job.payload;
+    if (
+      !payload ||
+      typeof payload !== 'object' ||
+      Array.isArray(payload) ||
+      !Array.isArray(payload.lines) ||
+      typeof payload.headerLines !== 'number' ||
+      typeof payload.paymentFingerprint !== 'string'
+    )
+      throw unavailable();
+
+    const partId =
+      job.type === 'PART_TICKET' ? job.documentKey?.split(':')[1] : undefined;
+    if (job.type === 'PART_TICKET' && !partId) throw unavailable();
+    const [order, payments] = await Promise.all([
+      this.db.order.findUnique({
+        where: { id: job.orderId },
+        select: { status: true },
+      }),
+      this.db.payment.findMany({
+        where: {
+          orderId: job.orderId,
+          billPartId: partId,
+          status: 'COMPLETED',
+        },
+        select: { id: true },
+      }),
+    ]);
+    if (
+      !order ||
+      order.status === 'CANCELLED' ||
+      (!partId && order.status !== 'PAID') ||
+      payments.length === 0 ||
+      paymentFingerprint(payments) !== payload.paymentFingerprint
+    )
+      throw unavailable();
+
+    const logo = await this.files.readBusinessLogo();
+    return {
+      lines: payload.lines.filter(
+        (line): line is string =>
+          typeof line === 'string' &&
+          !/^\s*(Cliente|Cajero|Referencia|Nota|Observaciones):/i.test(line),
+      ),
+      headerLines: payload.headerLines,
+      logo: logo ? `data:${logo.mimeType};base64,${logo.data}` : null,
+    };
+  }
+
   private async authenticate(tx: Prisma.TransactionClient, header?: string) {
     const token = /^Bearer ([a-f0-9]{64})$/i.exec(header ?? '')?.[1];
     if (!token) throw new UnauthorizedException();
@@ -914,44 +1019,66 @@ export class PrintingService {
   }
 
   async claim(header?: string) {
-    const { job, includeLogo } = await this.db.$transaction(async (tx) => {
-      const printerAgentId = await this.authenticate(tx, header);
-      const where = {
-        status: 'PENDING' as const,
-        printer: { ...readyPrinter, printerAgentId },
-      };
-      const job = await tx.printJob.findFirst({
-        where,
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-        include: { printer: true },
-      });
-      if (!job) return { job: null };
-      const changed = await tx.printJob.updateMany({
-        where: { ...where, id: job.id },
-        data: {
-          status: 'PROCESSING',
-          processingAt: new Date(),
-          attempts: { increment: 1 },
-        },
-      });
-      return {
-        includeLogo:
-          job.type === 'PREBILL' ||
-          job.type === 'CUSTOMER_TICKET' ||
-          job.type === 'PART_TICKET',
-        job: changed.count
-          ? {
-              id: job.id,
-              attempt: job.attempts + 1,
-              payload: job.payload,
-              printer: job.printer,
-            }
-          : null,
-      };
-    });
+    const { job, includeLogo, includeQR } = await this.db.$transaction(
+      async (tx) => {
+        const printerAgentId = await this.authenticate(tx, header);
+        const where = {
+          status: 'PENDING' as const,
+          printer: { ...readyPrinter, printerAgentId },
+        };
+        const job = await tx.printJob.findFirst({
+          where,
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          include: { printer: true },
+        });
+        if (!job) return { job: null };
+        const changed = await tx.printJob.updateMany({
+          where: { ...where, id: job.id },
+          data: {
+            status: 'PROCESSING',
+            processingAt: new Date(),
+            attempts: { increment: 1 },
+          },
+        });
+        return {
+          includeQR:
+            (job.type === 'CUSTOMER_TICKET' || job.type === 'PART_TICKET') &&
+            !!job.payload &&
+            typeof job.payload === 'object' &&
+            !Array.isArray(job.payload) &&
+            typeof job.payload.paymentFingerprint === 'string',
+          includeLogo:
+            job.type === 'PREBILL' ||
+            job.type === 'CUSTOMER_TICKET' ||
+            job.type === 'PART_TICKET',
+          job: changed.count
+            ? {
+                id: job.id,
+                attempt: job.attempts + 1,
+                payload: job.payload,
+                printer: job.printer,
+              }
+            : null,
+        };
+      },
+    );
     if (!job || !includeLogo) return { job };
-    const logoImage = await this.files.readBusinessLogo();
-    return { job: logoImage ? { ...job, logoImage } : job };
+    const logo = await this.files.readBusinessLogo();
+    const origin = this.config.get<string>('PUBLIC_TICKET_ORIGIN');
+    return {
+      job: {
+        ...job,
+        logoImage: logo?.data,
+        ...(includeQR && origin
+          ? {
+              receiptUrl: new URL(
+                `/ticket#${job.id}.${this.receiptSignature(job.id)}`,
+                origin,
+              ).href,
+            }
+          : {}),
+      },
+    };
   }
 
   result(id: string, dto: PrintResultDto, header?: string) {

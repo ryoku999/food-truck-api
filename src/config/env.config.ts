@@ -8,6 +8,20 @@ export const envSchema = z.object({
   DATABASE_URL: z.string(),
   API_PREFIX: z.string(),
   CORS_ORIGINS: z.string(),
+  PUBLIC_TICKET_ORIGIN: z
+    .url()
+    .refine((value) => {
+      const url = new URL(value);
+      return (
+        ['http:', 'https:'].includes(url.protocol) &&
+        url.pathname === '/' &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash
+      );
+    }, 'Usa el origen HTTP(S) del frontend, sin ruta')
+    .optional(),
   RATE_LIMIT_LIMIT: z.coerce.number().positive(),
   RATE_LIMIT_TTL: z.coerce.number().positive(),
   AUTH_ACCESS_COOKIE_NAME: z.string(),

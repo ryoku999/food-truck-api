@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   Headers,
   Module,
   Param,
@@ -34,6 +35,13 @@ import { PrintingService } from './printing.service';
 @Controller()
 class PrintingController {
   constructor(private readonly service: PrintingService) {}
+
+  @Get('public/receipt')
+  @Header('Cache-Control', 'no-store')
+  @Header('X-Robots-Tag', 'noindex, nofollow')
+  publicReceipt(@Headers('authorization') header?: string) {
+    return this.service.publicReceipt(header);
+  }
 
   @Get('printers')
   @Auth('ADMIN', 'MANAGER')
