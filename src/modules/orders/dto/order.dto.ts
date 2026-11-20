@@ -124,6 +124,17 @@ export class OrderQueryDto {
   search?: string;
 
   @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' && /^\d{1,10}$/.test(value.trim())
+      ? Number(value.trim())
+      : value,
+  )
+  @IsInt()
+  @Min(1)
+  @Max(2147483647)
+  ticketNumber?: number;
+
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)

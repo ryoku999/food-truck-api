@@ -220,7 +220,14 @@ export class OrdersService {
 
   async findAll(query: OrderQueryDto): Promise<PaginatedOrdersResponse> {
     const numericSearch = query.search ? Number(query.search) : Number.NaN;
+    const ticketOrderId =
+      query.ticketNumber === undefined
+        ? undefined
+        : await this.findOrderIdForTicket(query.ticketNumber);
     const where: Prisma.OrderWhereInput = {
+      ...(query.ticketNumber === undefined
+        ? {}
+        : { id: ticketOrderId ?? { in: [] } }),
       status: query.status,
       ...(query.view && {
         AND: {
@@ -274,6 +281,25 @@ export class OrdersService {
         pageCount: Math.ceil(total / query.pageSize),
       },
     };
+  }
+
+  private async findOrderIdForTicket(
+    number: number,
+  ): Promise<string | undefined> {
+    const ticket = await this.db.paymentTicketNumber.findUnique({
+      where: { number },
+      select: { key: true },
+    });
+    if (!ticket) return;
+    // Number keys identify either the order or the paid part, followed by a payment fingerprint.
+    const [scope, id] = ticket.key.split(':');
+    if (scope === 'order') return id;
+    if (scope !== 'part' || !id) return;
+    const part = await this.db.billPart.findUnique({
+      where: { id },
+      select: { orderId: true },
+    });
+    return part?.orderId;
   }
 
   async findOne(params: OrderIdParamDto): Promise<OrderDetailResponse> {
