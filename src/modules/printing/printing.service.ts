@@ -1,4 +1,5 @@
 import { DatabaseService } from '@/database/database.service';
+import { FilesService } from '@/modules/files/files.service';
 import { PrinterWorkerEventsService } from '@/modules/realtime/printer-worker-events.service';
 import { Prisma } from '@/generated/prisma/client';
 import { PrintJobType } from '@/generated/prisma/enums';
@@ -110,6 +111,7 @@ export class PrintingService {
   constructor(
     private readonly db: DatabaseService,
     private readonly printerWorkerEvents: PrinterWorkerEventsService,
+    private readonly files: FilesService,
   ) {}
 
   agents() {
@@ -911,8 +913,8 @@ export class PrintingService {
     return agent[0].id;
   }
 
-  claim(header?: string) {
-    return this.db.$transaction(async (tx) => {
+  async claim(header?: string) {
+    const { job, includeLogo } = await this.db.$transaction(async (tx) => {
       const printerAgentId = await this.authenticate(tx, header);
       const where = {
         status: 'PENDING' as const,
@@ -933,6 +935,10 @@ export class PrintingService {
         },
       });
       return {
+        includeLogo:
+          job.type === 'PREBILL' ||
+          job.type === 'CUSTOMER_TICKET' ||
+          job.type === 'PART_TICKET',
         job: changed.count
           ? {
               id: job.id,
@@ -943,6 +949,9 @@ export class PrintingService {
           : null,
       };
     });
+    if (!job || !includeLogo) return { job };
+    const logoImage = await this.files.readBusinessLogo();
+    return { job: logoImage ? { ...job, logoImage } : job };
   }
 
   result(id: string, dto: PrintResultDto, header?: string) {

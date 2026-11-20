@@ -6,7 +6,7 @@ import { SetBusinessLogoDto } from './dto/set-business-logo.dto';
 import { UpsertBusinessDto } from './dto/upsert-business.dto';
 import { BusinessResponse } from './interfaces/business.interface';
 
-const BUSINESS_ID = '00000000-0000-4000-8000-000000000001';
+import { BUSINESS_ID } from './business.constants';
 
 const BUSINESS_INCLUDE = {
   logoFile: {

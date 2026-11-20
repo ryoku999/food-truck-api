@@ -1,5 +1,6 @@
 import { DatabaseService } from '@/database/database.service';
 import { FileType } from '@/generated/prisma/enums';
+import { BUSINESS_ID } from '@/modules/business/business.constants';
 import {
   BadRequestException,
   ConflictException,
@@ -18,6 +19,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { randomUUID } from 'node:crypto';
+import { addAbortSignal, Readable } from 'node:stream';
 import { FileIdParamDto } from './dto/file-id-param.dto';
 import { UploadImageDto } from './dto/upload-image.dto';
 import {
@@ -220,6 +222,44 @@ export class FilesService implements OnModuleInit {
       new GetObjectCommand({ Bucket: file.bucket, Key: file.objectKey }),
       { expiresIn: this.urlExpirySeconds },
     );
+  }
+
+  async readBusinessLogo(): Promise<string | undefined> {
+    try {
+      const business = await this.db.business.findUnique({
+        where: { id: BUSINESS_ID },
+        select: { logoFileId: true },
+      });
+      if (!business?.logoFileId) return;
+      const file = await this.db.file.findUnique({
+        where: { id: business.logoFileId, type: FileType.LOGO },
+        select: { bucket: true, objectKey: true, size: true },
+      });
+      const limit = Math.min(this.maxImageSize, 5 * 1024 * 1024);
+      if (!file || (file.size !== null && file.size > limit)) return;
+
+      const signal = AbortSignal.timeout(2_000);
+      const { Body } = await this.storage.send(
+        new GetObjectCommand({ Bucket: file.bucket, Key: file.objectKey }),
+        { abortSignal: signal },
+      );
+      if (!(Body instanceof Readable)) return;
+
+      const chunks: Buffer[] = [];
+      let size = 0;
+      for await (const chunk of addAbortSignal(
+        signal,
+        Body,
+      ) as AsyncIterable<Buffer>) {
+        size += chunk.length;
+        if (size > limit) return;
+        chunks.push(chunk);
+      }
+      if (size > 0 && (file.size === null || size === file.size))
+        return Buffer.concat(chunks, size).toString('base64');
+    } catch {
+      this.logger.warn('No se pudo cargar el logo para imprimir el ticket');
+    }
   }
 
   private deleteObject(bucket: string, key: string) {

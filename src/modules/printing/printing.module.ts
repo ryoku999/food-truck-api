@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { Auth } from '@/shared/decorators/auth.decorator';
 import { RealtimeModule } from '@/modules/realtime/realtime.module';
+import { FilesModule } from '@/modules/files/files.module';
 import { CurrentUser } from '@/shared/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '@/shared/interfaces/authenticated-user.interface';
 import {
@@ -174,7 +175,7 @@ class PrinterWorkerController {
 }
 
 @Module({
-  imports: [RealtimeModule],
+  imports: [RealtimeModule, FilesModule],
   controllers: [PrintingController, PrinterWorkerController],
   providers: [PrintingService],
 })
