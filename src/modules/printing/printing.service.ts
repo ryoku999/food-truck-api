@@ -65,16 +65,19 @@ function documentPayload(
   title: string,
   header: string[],
   lines: string[],
+  type: 'CUSTOMER_TICKET' | 'PART_TICKET' | 'PREBILL' | 'PAYMENT_RECEIPT',
 ) {
+  const emphasizeFooter = type === 'CUSTOMER_TICKET' || type === 'PART_TICKET';
   return {
     headerLines: header.length + 1,
+    emphasizeFooter,
     lines: [
       ...header,
       title,
       `Nro. ${id.replace(/-/g, '').slice(0, 16).toUpperCase()}`,
       ...lines,
-      separator,
-      internalNotice,
+      ...(emphasizeFooter ? [separator, 'Gracias por su visita'] : []),
+      ...(type === 'PAYMENT_RECEIPT' ? [separator, internalNotice] : []),
     ],
   };
 }
@@ -546,8 +549,8 @@ export class PrintingService {
               separator,
               ...order.payments.flatMap(paymentLines),
               'Estado: PAGADO',
-              'Gracias por su visita',
             ],
+            'CUSTOMER_TICKET',
           )
         : { lines: ['Prueba de impresión', printer.name, message ?? ''] };
       const job = await tx.printJob.create({
@@ -726,10 +729,11 @@ export class PrintingService {
     const business = await tx.business.findFirst({
       orderBy: { createdAt: 'asc' },
     });
+    const address = business?.address?.trim();
     return [
       business?.tradeName || business?.name || 'Food Truck',
       ...(business?.documentNumber ? [business.documentNumber] : []),
-      ...(business?.address ? [business.address] : []),
+      ...(address ? [address] : []),
       ...(business?.phone ? [`Tel: ${business.phone}`] : []),
     ];
   }
@@ -870,7 +874,13 @@ export class PrintingService {
         orderId: data.orderId,
         printerId: printer.id,
         type: data.type,
-        payload: documentPayload(id, data.title, data.header, data.lines),
+        payload: documentPayload(
+          id,
+          data.title,
+          data.header,
+          data.lines,
+          data.type,
+        ),
         items: {
           create: data.itemIds?.map((orderItemId) => ({ orderItemId })) ?? [],
         },
