@@ -1,5 +1,5 @@
 import { PrinterPurpose, PrintJobStatus } from '@/generated/prisma/enums';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsBoolean,
   IsEnum,
@@ -41,9 +41,17 @@ export class PrinterQueryDto {
   @IsOptional() @IsEnum(PrinterPurpose) purpose?: PrinterPurpose;
   @IsOptional() @IsUUID() printerAgentId?: string;
 }
+function parsePrintNumber({ value }: { value: unknown }) {
+  return typeof value === 'string' && /^\d{1,10}$/.test(value)
+    ? Number(value)
+    : value;
+}
+
 export class JobQueryDto {
   @IsOptional() @IsEnum(PrintJobStatus) status?: PrintJobStatus;
   @IsOptional() @IsUUID() orderId?: string;
+  @IsOptional() @Transform(parsePrintNumber) @IsInt() @Min(1) @Max(2147483647) orderNumber?: number;
+  @IsOptional() @Transform(parsePrintNumber) @IsInt() @Min(1) @Max(2147483647) ticketNumber?: number;
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) limit = 30;
   @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(100000) offset = 0;
 }

@@ -40,6 +40,18 @@ const readyPrinter = {
   status: 'ACTIVE',
   printerAgent: { active: true },
 } satisfies Prisma.PrinterWhereInput;
+const printJobDisplay = {
+  printer: { select: { name: true } },
+  order: {
+    select: {
+      number: true,
+      type: true,
+      tables: {
+        select: { table: { select: { name: true, number: true } } },
+      },
+    },
+  },
+} satisfies Prisma.PrintJobInclude;
 const cashierPrinter = {
   ...readyPrinter,
   purpose: { in: ['CASHIER', 'GENERAL'] },
@@ -282,10 +294,18 @@ export class PrintingService {
   }
 
   async jobs(query: JobQueryDto) {
-    const where = { status: query.status, orderId: query.orderId };
+    const where: Prisma.PrintJobWhereInput = {
+      status: query.status,
+      orderId: query.orderId,
+      ...(query.orderNumber !== undefined && { order: { number: query.orderNumber } }),
+      ...(query.ticketNumber !== undefined && {
+        AND: await this.printJobTicketFilter(query.ticketNumber),
+      }),
+    };
     const [items, total] = await this.db.$transaction([
       this.db.printJob.findMany({
         where,
+        include: printJobDisplay,
         take: query.limit,
         skip: query.offset,
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -295,10 +315,37 @@ export class PrintingService {
     return { items, total, limit: query.limit, offset: query.offset };
   }
 
+  private async printJobTicketFilter(number: number): Promise<Prisma.PrintJobWhereInput> {
+    const ticket = await this.db.paymentTicketNumber.findUnique({
+      where: { number },
+      select: { key: true },
+    });
+    if (!ticket) return { id: { in: [] } };
+    const [scope, id] = ticket.key.split(':');
+    const printedNumber = {
+      path: ['lines'],
+      array_contains: [`Nro. ${String(number).padStart(6, '0')}`],
+    };
+    if (scope === 'order' && id) {
+      return { orderId: id, type: 'CUSTOMER_TICKET', payload: printedNumber };
+    }
+    if (scope === 'part' && id) {
+      return {
+        type: 'PART_TICKET',
+        OR: [
+          { documentKey: ticket.key },
+          { documentKey: { startsWith: `${ticket.key}:` } },
+        ],
+        payload: printedNumber,
+      };
+    }
+    return { id: { in: [] } };
+  }
+
   async job(id: string) {
     const job = await this.db.printJob.findUnique({
       where: { id },
-      include: { items: true },
+      include: { ...printJobDisplay, items: true },
     });
     if (!job) throw new NotFoundException('Trabajo no encontrado');
     return job;
