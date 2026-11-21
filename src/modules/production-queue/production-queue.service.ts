@@ -249,7 +249,7 @@ export class ProductionQueueService {
     dto: UpdatePreparationStatusDto,
     user: AuthenticatedUser,
   ): Promise<ProductionQueueItemResponse> {
-    await this.db.$transaction(
+    const ownerId = await this.db.$transaction(
       async (tx) => {
         const item = await tx.orderItem.findUnique({
           where: { id: params.id },
@@ -259,7 +259,7 @@ export class ProductionQueueService {
             status: true,
             productionArea: true,
             productNameSnapshot: true,
-            order: { select: { status: true } },
+            order: { select: { status: true, createdById: true } },
           },
         });
         if (!item)
@@ -324,10 +324,21 @@ export class ProductionQueueService {
             description: `${item.productNameSnapshot}: ${item.status} -> ${dto.status}`,
           },
         });
+        return item.order.createdById;
       },
       { isolationLevel: 'Serializable' },
     );
     const response = await this.findOne(area, params.id);
+    if (
+      ownerId &&
+      dto.status === OrderItemStatus.READY &&
+      response.status === OrderItemStatus.READY
+    ) {
+      this.operationsEvents.emitWaiterItemReady(ownerId, {
+        id: response.id,
+        orderId: response.orderId,
+      });
+    }
     this.operationsEvents.emitOrderItemStatusChanged(
       response,
       area === ProductionAreaCode.KITCHEN ? 'KITCHEN' : 'BAR',

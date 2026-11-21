@@ -2,6 +2,8 @@ export const OPERATIONS_EVENTS = {
   ORDER_SENT: 'order.sent',
   KITCHEN_ITEM_CREATED: 'kitchen.item.created',
   BAR_ITEM_CREATED: 'bar.item.created',
+  PRODUCTION_BATCH_RECEIVED: 'production.batch.received',
+  WAITER_ITEM_READY: 'waiter.item.ready',
   ORDER_ITEM_STATUS_CHANGED: 'order-item.status.changed',
   ORDER_STATUS_CHANGED: 'order.status.changed',
   TABLE_STATUS_CHANGED: 'table.status.changed',

@@ -1,7 +1,9 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
+  Header,
   Headers,
   Module,
   Param,
@@ -10,6 +12,8 @@ import {
   Query,
 } from '@nestjs/common';
 import { Auth } from '@/shared/decorators/auth.decorator';
+import { RealtimeModule } from '@/modules/realtime/realtime.module';
+import { FilesModule } from '@/modules/files/files.module';
 import { CurrentUser } from '@/shared/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '@/shared/interfaces/authenticated-user.interface';
 import {
@@ -32,6 +36,13 @@ import { PrintingService } from './printing.service';
 class PrintingController {
   constructor(private readonly service: PrintingService) {}
 
+  @Get('public/receipt')
+  @Header('Cache-Control', 'no-store')
+  @Header('X-Robots-Tag', 'noindex, nofollow')
+  publicReceipt(@Headers('authorization') header?: string) {
+    return this.service.publicReceipt(header);
+  }
+
   @Get('printers')
   @Auth('ADMIN', 'MANAGER')
   printers(@Query() query: PrinterQueryDto) {
@@ -48,6 +59,15 @@ class PrintingController {
   @Auth('ADMIN', 'MANAGER')
   updatePrinter(@Param() { id }: IdDto, @Body() dto: PrinterUpdateDto) {
     return this.service.savePrinter(dto, id);
+  }
+
+  @Delete('printers/:id')
+  @Auth('ADMIN', 'MANAGER')
+  deletePrinter(
+    @Param() { id }: IdDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.deletePrinter(id, user.id);
   }
 
   @Post('printers/:id/test')
@@ -98,8 +118,18 @@ class PrintingController {
 
   @Post('print-jobs/:id/retry')
   @Auth('CASHIER', 'ADMIN', 'MANAGER')
-  retry(@Param() { id }: IdDto, @CurrentUser() user: AuthenticatedUser) {
-    return this.service.retry(id, user.id);
+  retry(
+    @Param() { id }: IdDto,
+    @Body() dto: PrintTicketDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.service.retry(id, user.id, dto?.printerId);
+  }
+
+  @Get('print-jobs/:id/retry-printers')
+  @Auth('CASHIER', 'ADMIN', 'MANAGER')
+  retryPrinters(@Param() { id }: IdDto) {
+    return this.service.retryPrinters(id);
   }
 
   @Post('orders/:id/print-prebill')
@@ -136,10 +166,10 @@ class PrintingController {
   @Auth('CASHIER', 'ADMIN', 'MANAGER')
   partTicket(
     @Param() { id, partId }: PartTicketParamsDto,
-    @Body() dto: PrintTicketDto,
+    @Body() dto: PrintPrebillDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.service.enqueuePartTicket(id, partId, dto.printerId, user.id);
+    return this.service.enqueuePartTicket(id, partId, dto.printerId, user.id, dto.copyId);
   }
 }
 
@@ -163,6 +193,7 @@ class PrinterWorkerController {
 }
 
 @Module({
+  imports: [RealtimeModule, FilesModule],
   controllers: [PrintingController, PrinterWorkerController],
   providers: [PrintingService],
 })

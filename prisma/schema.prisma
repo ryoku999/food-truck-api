@@ -1002,6 +1002,7 @@ model Printer {
   purpose PrinterPurpose
 
   connectionType PrinterConnectionType
+  fallbackEnabled Boolean @default(false)
 
   status PrinterStatus @default(ACTIVE)
 
@@ -1070,6 +1071,13 @@ model PrinterAgent {
 // ==========================================================
 // TRABAJOS DE IMPRESIÓN
 // ==========================================================
+
+model PaymentTicketNumber {
+  key    String @id
+  number Int    @unique @default(autoincrement())
+
+  @@map("payment_ticket_numbers")
+}
 
 model PrintJob {
   id String @id @default(uuid()) @db.Uuid

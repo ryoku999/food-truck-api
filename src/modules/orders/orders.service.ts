@@ -15,6 +15,7 @@ import {
 } from '@/generated/prisma/enums';
 import type { AuthenticatedUser } from '@/shared/interfaces/authenticated-user.interface';
 import { OperationsEventsService } from '@/modules/realtime/operations-events.service';
+import { PrinterWorkerEventsService } from '@/modules/realtime/printer-worker-events.service';
 import {
   BadRequestException,
   ConflictException,
@@ -139,6 +140,7 @@ export class OrdersService {
   constructor(
     private readonly db: DatabaseService,
     private readonly operationsEvents: OperationsEventsService,
+    private readonly printerWorkerEvents: PrinterWorkerEventsService,
   ) {}
 
   async create(
@@ -183,9 +185,49 @@ export class OrdersService {
     return this.findOne({ id: orderId });
   }
 
+  async readyForService(userId: string) {
+    const orders = await this.db.order.findMany({
+      where: {
+        createdById: userId,
+        status: { in: OPEN_STATUSES },
+        items: { some: { status: OrderItemStatus.READY } },
+      },
+      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+      select: {
+        id: true,
+        number: true,
+        status: true,
+        tables: {
+          select: { table: { select: { id: true, number: true, name: true } } },
+        },
+        items: {
+          where: { status: OrderItemStatus.READY },
+          orderBy: [{ readyAt: 'asc' }, { id: 'asc' }],
+          select: {
+            id: true,
+            productNameSnapshot: true,
+            variantNameSnapshot: true,
+            quantity: true,
+          },
+        },
+      },
+    });
+    return orders.map(({ tables, ...order }) => ({
+      ...order,
+      tables: tables.map(({ table }) => table),
+    }));
+  }
+
   async findAll(query: OrderQueryDto): Promise<PaginatedOrdersResponse> {
     const numericSearch = query.search ? Number(query.search) : Number.NaN;
+    const ticketOrderId =
+      query.ticketNumber === undefined
+        ? undefined
+        : await this.findOrderIdForTicket(query.ticketNumber);
     const where: Prisma.OrderWhereInput = {
+      ...(query.ticketNumber === undefined
+        ? {}
+        : { id: ticketOrderId ?? { in: [] } }),
       status: query.status,
       ...(query.view && {
         AND: {
@@ -239,6 +281,25 @@ export class OrdersService {
         pageCount: Math.ceil(total / query.pageSize),
       },
     };
+  }
+
+  private async findOrderIdForTicket(
+    number: number,
+  ): Promise<string | undefined> {
+    const ticket = await this.db.paymentTicketNumber.findUnique({
+      where: { number },
+      select: { key: true },
+    });
+    if (!ticket) return;
+    // Number keys identify either the order or the paid part, followed by a payment fingerprint.
+    const [scope, id] = ticket.key.split(':');
+    if (scope === 'order') return id;
+    if (scope !== 'part' || !id) return;
+    const part = await this.db.billPart.findUnique({
+      where: { id },
+      select: { orderId: true },
+    });
+    return part?.orderId;
   }
 
   async findOne(params: OrderIdParamDto): Promise<OrderDetailResponse> {
@@ -532,15 +593,22 @@ export class OrdersService {
       { isolationLevel: 'Serializable' },
     );
     const response = await this.findOne(params);
+    this.printerWorkerEvents.notifyJobsAvailable();
     this.operationsEvents.emitOrderSent(response);
+    const notifiedAreas = new Set<'KITCHEN' | 'BAR'>();
     for (const item of response.items.filter((item) =>
       sentIds.includes(item.id),
     )) {
       if (item.productionArea === ProductionAreaCode.KITCHEN) {
         this.operationsEvents.emitKitchenItemCreated(item);
+        notifiedAreas.add('KITCHEN');
       } else if (item.productionArea === ProductionAreaCode.BAR) {
         this.operationsEvents.emitBarItemCreated(item);
+        notifiedAreas.add('BAR');
       }
+    }
+    for (const area of notifiedAreas) {
+      this.operationsEvents.emitProductionBatchReceived(area, sentIds[0]);
     }
     for (const table of response.tables) {
       this.operationsEvents.emitTableStatusChanged({
