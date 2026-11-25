@@ -38,6 +38,6 @@ COPY --chown=nestjs:nodejs package.json ./
 
 USER nestjs
 
-EXPOSE 7500
+EXPOSE 4500
 
 CMD ["node", "dist/src/main"]
