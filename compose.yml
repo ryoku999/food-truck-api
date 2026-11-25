@@ -6,10 +6,10 @@ services:
       target: production
       dockerfile: ./Dockerfile
     ports:
-      - "7500:7500"
+      - "4500:4500"
     env_file:
       - .env
     environment:
-      PORT: 7500
+      PORT: 4500
       TZ: America/Lima
     restart: unless-stopped
