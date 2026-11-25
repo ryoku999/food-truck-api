@@ -12,6 +12,7 @@ import {
   PrintJobType,
   ProductionAreaCode,
   TableStatus,
+  UserRole,
 } from '@/generated/prisma/enums';
 import type { AuthenticatedUser } from '@/shared/interfaces/authenticated-user.interface';
 import { OperationsEventsService } from '@/modules/realtime/operations-events.service';
@@ -19,6 +20,7 @@ import { PrinterWorkerEventsService } from '@/modules/realtime/printer-worker-ev
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -648,10 +650,23 @@ export class OrdersService {
           select: {
             number: true,
             status: true,
+            createdById: true,
             tables: { select: { tableId: true } },
           },
         });
         if (!order) throw new NotFoundException('Pedido no encontrado');
+        if (user.userRole === UserRole.WAITER) {
+          if (order.createdById !== user.id) {
+            throw new ForbiddenException(
+              'Solo puedes cancelar tus propios borradores',
+            );
+          }
+          if (order.status !== OrderStatus.DRAFT) {
+            throw new ConflictException(
+              'Solo puedes cancelar pedidos que sigan en borrador',
+            );
+          }
+        }
         if (
           order.status === OrderStatus.PAID ||
           order.status === OrderStatus.CANCELLED

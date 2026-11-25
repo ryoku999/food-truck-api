@@ -109,7 +109,7 @@ export class OrdersController {
   }
 
   @Post(':id/cancel')
-  @Auth(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER)
+  @Auth(UserRole.ADMIN, UserRole.MANAGER, UserRole.CASHIER, UserRole.WAITER)
   cancel(
     @Param() params: OrderIdParamDto,
     @Body() dto: CancelOrderDto,
