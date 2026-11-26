@@ -45,9 +45,6 @@ export interface OrderItemResponse {
   productionArea: ProductionAreaCode;
   sentAt: Date | null;
   roundNumber: number | null;
-  preparingAt: Date | null;
-  readyAt: Date | null;
-  servedAt: Date | null;
   cancelledAt: Date | null;
   cancellationReason: string | null;
   createdBy: { id: string; username: string } | null;

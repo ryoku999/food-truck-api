@@ -27,8 +27,6 @@ enum UserRole {
   MANAGER
   CASHIER
   WAITER
-  KITCHEN
-  BAR
 }
 
 enum TableStatus {
@@ -46,19 +44,13 @@ enum OrderType {
 enum OrderStatus {
   DRAFT
   SENT
-  IN_PROGRESS
-  READY
-  SERVED
   PAID
   CANCELLED
 }
 
 enum OrderItemStatus {
   DRAFT
-  PENDING
-  PREPARING
-  READY
-  SERVED
+  SENT
   CANCELLED
 }
 
@@ -721,9 +713,6 @@ model OrderItem {
   productionArea ProductionAreaCode @default(NONE)
 
   sentAt      DateTime?
-  preparingAt DateTime?
-  readyAt     DateTime?
-  servedAt    DateTime?
   cancelledAt DateTime?
 
   createdById String? @db.Uuid
@@ -746,7 +735,6 @@ model OrderItem {
 
   @@index([orderId])
   @@index([orderId, status])
-  @@index([productionArea, status])
   @@map("order_items")
 }
 

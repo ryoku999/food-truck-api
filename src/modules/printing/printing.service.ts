@@ -1,6 +1,14 @@
+import { serializableTransaction } from '@/database/serializable-transaction';
 import { DatabaseService } from '@/database/database.service';
 import { FilesService } from '@/modules/files/files.service';
+import {
+  commandContentsSelect,
+  currentCommandPayload,
+  productionCommandTypes,
+} from '@/modules/orders/production-command';
+import { OperationsEventsService } from '@/modules/realtime/operations-events.service';
 import { PrinterWorkerEventsService } from '@/modules/realtime/printer-worker-events.service';
+import { formatThermalTicketDate as documentDate } from '@/shared/utils/thermal-ticket-date';
 import { Prisma } from '@/generated/prisma/client';
 import { PrintJobType } from '@/generated/prisma/enums';
 import {
@@ -25,7 +33,13 @@ import {
   PrinterQueryDto,
   PrinterUpdateDto,
   PrintResultDto,
+  RetryPrintJobDto,
 } from './printing.dto';
+import {
+  readyPrinter,
+  retryablePrintErrorPrefix as safeError,
+  uncertainPrintErrorPrefix,
+} from './print-job-routing';
 
 const agentSelect = {
   id: true,
@@ -35,11 +49,6 @@ const agentSelect = {
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.PrinterAgentSelect;
-const readyPrinter = {
-  active: true,
-  status: 'ACTIVE',
-  printerAgent: { active: true },
-} satisfies Prisma.PrinterWhereInput;
 const printJobDisplay = {
   printer: { select: { name: true } },
   order: {
@@ -54,9 +63,16 @@ const printJobDisplay = {
 } satisfies Prisma.PrintJobInclude;
 const cashierPrinter = {
   ...readyPrinter,
-  purpose: { in: ['CASHIER', 'GENERAL'] },
+  purpose: 'CASHIER',
 } satisfies Prisma.PrinterWhereInput;
-const safeError = 'RETRYABLE: ';
+const jobEventSelect = {
+  id: true,
+  printerId: true,
+  orderId: true,
+  type: true,
+  status: true,
+  order: { select: { createdById: true } },
+} satisfies Prisma.PrintJobSelect;
 const hash = (token: string) =>
   createHash('sha256').update(token).digest('hex');
 const separator = '--------------------------------';
@@ -82,15 +98,6 @@ function personName(
   );
 }
 
-function documentDate(date: Date) {
-  return new Intl.DateTimeFormat('es-PE', {
-    timeZone: 'America/Lima',
-    dateStyle: 'short',
-    timeStyle: 'medium',
-    hourCycle: 'h23',
-  }).format(date);
-}
-
 function documentPayload(
   id: string,
   title: string,
@@ -109,7 +116,7 @@ function documentPayload(
     lines: [
       ...header,
       title,
-      `Nro. ${reference}`,
+      ...(type === 'PREBILL' ? [] : [`Nro. ${reference}`]),
       ...lines,
       ...(emphasizeFooter ? [separator, 'Gracias por su visita'] : []),
       ...(type === 'PAYMENT_RECEIPT' ? [separator, internalNotice] : []),
@@ -147,6 +154,7 @@ export class PrintingService {
     private readonly printerWorkerEvents: PrinterWorkerEventsService,
     private readonly files: FilesService,
     private readonly config: ConfigService,
+    private readonly operationsEvents: OperationsEventsService,
   ) {}
 
   agents() {
@@ -364,13 +372,25 @@ export class PrintingService {
     });
   }
 
-  async retry(id: string, userId: string, printerId?: string) {
-    const job = await this.db.$transaction(async (tx) => {
+  async retry(id: string, userId: string, dto: RetryPrintJobDto = {}) {
+    const { printerId, confirmedMissingPaper } = dto;
+    const { job, order } = await serializableTransaction(this.db, async (tx) => {
       const previous = await tx.printJob.findFirst({
-        where: { id, status: 'FAILED', error: { startsWith: safeError } },
-        select: { printerId: true, type: true, attempts: true, error: true },
+        where: { id, status: 'FAILED' },
+        select: {
+          printerId: true,
+          type: true,
+          attempts: true,
+          error: true,
+          order: jobEventSelect.order,
+        },
       });
       if (!previous)
+        throw new ConflictException('El trabajo no está pendiente de recuperación');
+      const isCommand = productionCommandTypes.some((type) => type === previous.type);
+      const confirmed = isCommand && confirmedMissingPaper &&
+        previous.error?.startsWith(uncertainPrintErrorPrefix);
+      if (!confirmed && !previous.error?.startsWith(safeError))
         throw new ConflictException('El trabajo no admite un reintento seguro');
       if (printerId) {
         if (previous.type !== 'PREBILL' || printerId === previous.printerId)
@@ -382,11 +402,22 @@ export class PrintingService {
         if (!destination)
           throw new ConflictException('La impresora elegida no está disponible para Caja');
       }
+      let payload: Prisma.InputJsonValue | undefined;
+      if (isCommand) {
+        const contents = await tx.printJob.findUniqueOrThrow({
+          where: { id },
+          select: commandContentsSelect,
+        });
+        payload = currentCommandPayload(contents);
+        if (!payload) {
+          throw new ConflictException('La comanda ya no tiene productos por imprimir');
+        }
+      }
       const changed = await tx.printJob.updateMany({
         where: {
           id,
           status: 'FAILED',
-          error: { startsWith: safeError },
+          error: previous.error,
           attempts: previous.attempts,
           printerId: previous.printerId,
           ...(printerId ? {} : { printer: readyPrinter }),
@@ -396,6 +427,7 @@ export class PrintingService {
           error: null,
           failedAt: null,
           processingAt: null,
+          payload,
           ...(printerId ? { printerId } : {}),
         },
       });
@@ -407,13 +439,19 @@ export class PrintingService {
           entity: 'PrintJob',
           entityId: id,
           userId,
-          description: 'Reintento de impresión',
+          description: confirmed
+            ? 'Reintento de comanda tras verificar que no salió papel'
+            : 'Reintento de impresión',
           oldData: { printerId: previous.printerId, error: previous.error },
           newData: { printerId: printerId ?? previous.printerId },
         },
       });
-      return tx.printJob.findUniqueOrThrow({ where: { id } });
+      return {
+        job: await tx.printJob.findUniqueOrThrow({ where: { id } }),
+        order: previous.order,
+      };
     });
+    this.emitJobStatus({ ...job, order });
     this.printerWorkerEvents.notifyJobsAvailable();
     return job;
   }
@@ -586,7 +624,7 @@ export class PrintingService {
         where: {
           ...readyPrinter,
           id: printerId,
-          ...(orderId ? { purpose: { in: ['CASHIER', 'GENERAL'] } } : {}),
+          ...(orderId ? { purpose: 'CASHIER' as const } : {}),
         },
         orderBy: [{ purpose: 'asc' }, { id: 'asc' }],
       });
@@ -996,7 +1034,7 @@ export class PrintingService {
       where: {
         ...readyPrinter,
         id: data.printerId,
-        purpose: { in: ['CASHIER', 'GENERAL'] },
+        purpose: 'CASHIER',
       },
       orderBy: [{ purpose: 'asc' }, { id: 'asc' }],
     });
@@ -1148,7 +1186,7 @@ export class PrintingService {
   }
 
   async claim(header?: string) {
-    const { job, includeLogo, includeQR } = await this.db.$transaction(
+    const { job, event, includeLogo, includeQR } = await this.db.$transaction(
       async (tx) => {
         const printerAgentId = await this.authenticate(tx, header);
         const where = {
@@ -1158,39 +1196,37 @@ export class PrintingService {
         const job = await tx.printJob.findFirst({
           where,
           orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-          include: { printer: true },
+          select: { id: true, printer: true },
         });
         if (!job) return { job: null };
-        const changed = await tx.printJob.updateMany({
+        const [claimed] = await tx.printJob.updateManyAndReturn({
           where: { ...where, id: job.id },
           data: {
             status: 'PROCESSING',
             processingAt: new Date(),
             attempts: { increment: 1 },
           },
+          select: { ...jobEventSelect, attempts: true, payload: true },
         });
+        if (!claimed) return { job: null };
+        const { attempts, payload, ...event } = claimed;
         return {
+          event,
           includeQR:
-            (job.type === 'CUSTOMER_TICKET' || job.type === 'PART_TICKET') &&
-            !!job.payload &&
-            typeof job.payload === 'object' &&
-            !Array.isArray(job.payload) &&
-            typeof job.payload.paymentFingerprint === 'string',
+            (event.type === 'CUSTOMER_TICKET' || event.type === 'PART_TICKET') &&
+            !!payload &&
+            typeof payload === 'object' &&
+            !Array.isArray(payload) &&
+            typeof payload.paymentFingerprint === 'string',
           includeLogo:
-            job.type === 'PREBILL' ||
-            job.type === 'CUSTOMER_TICKET' ||
-            job.type === 'PART_TICKET',
-          job: changed.count
-            ? {
-                id: job.id,
-                attempt: job.attempts + 1,
-                payload: job.payload,
-                printer: job.printer,
-              }
-            : null,
+            event.type === 'PREBILL' ||
+            event.type === 'CUSTOMER_TICKET' ||
+            event.type === 'PART_TICKET',
+          job: { id: job.id, attempt: attempts, payload, printer: job.printer },
         };
       },
     );
+    if (event) this.emitJobStatus(event);
     if (!job || !includeLogo) return { job };
     const logo = await this.files.readBusinessLogo();
     const origin = this.config.get<string>('PUBLIC_TICKET_ORIGIN');
@@ -1210,12 +1246,12 @@ export class PrintingService {
     };
   }
 
-  result(id: string, dto: PrintResultDto, header?: string) {
-    return this.db.$transaction(async (tx) => {
+  async result(id: string, dto: PrintResultDto, header?: string) {
+    const event = await this.db.$transaction(async (tx) => {
       const printerAgentId = await this.authenticate(tx, header);
       const where = { id, attempts: dto.attempt, printer: { printerAgentId } };
       const printed = dto.status === 'PRINTED';
-      const changed = await tx.printJob.updateMany({
+      const [changed] = await tx.printJob.updateManyAndReturn({
         where: { ...where, status: 'PROCESSING' },
         data: {
           status: dto.status,
@@ -1223,19 +1259,36 @@ export class PrintingService {
           failedAt: printed ? null : new Date(),
           error: printed
             ? null
-            : (dto.safeToRetry ? safeError : 'UNCERTAIN: ') +
+            : (dto.safeToRetry ? safeError : uncertainPrintErrorPrefix) +
               (dto.error ?? 'Error de impresión'),
         },
+        select: jobEventSelect,
       });
       if (
-        !changed.count &&
+        !changed &&
         !(await tx.printJob.findFirst({
           where: { ...where, status: dto.status },
           select: { id: true },
         }))
       )
         throw new ConflictException('Intento de impresión no vigente');
-      return { ok: true };
+      return changed;
     });
+    if (event) this.emitJobStatus(event);
+    return { ok: true };
+  }
+
+  private emitJobStatus({
+    id,
+    printerId,
+    orderId,
+    type,
+    status,
+    order,
+  }: Prisma.PrintJobGetPayload<{ select: typeof jobEventSelect }>) {
+    this.operationsEvents.emitPrintJobStatusChanged(
+      { id, printerId, orderId, type, status },
+      type === 'KITCHEN_COMMAND' || type === 'BAR_COMMAND' ? order?.createdById : null,
+    );
   }
 }

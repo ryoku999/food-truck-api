@@ -1,15 +1,20 @@
+import { serializableTransaction } from '@/database/serializable-transaction';
 import { orderRoundNumbers } from '@/shared/utils/order-rounds';
+import { formatThermalTicketDate } from '@/shared/utils/thermal-ticket-date';
 import { DatabaseService } from '@/database/database.service';
 import { ensureOrderUnbilled } from '@/modules/payments/ensure-order-unbilled';
 import { Prisma } from '@/generated/prisma/client';
+import {
+  readyPrinter,
+  retryablePrintErrorPrefix,
+} from '@/modules/printing/print-job-routing';
 import {
   AuditAction,
   OrderItemStatus,
   OrderStatus,
   OrderType,
   PrinterPurpose,
-  PrinterStatus,
-  PrintJobType,
+  PrintJobStatus,
   ProductionAreaCode,
   TableStatus,
   UserRole,
@@ -43,14 +48,37 @@ import {
   OrderSummaryResponse,
   PaginatedOrdersResponse,
 } from './interfaces/order.interface';
+import {
+  CommandArea,
+  commandAreaLabel,
+  commandContentsSelect,
+  currentCommandPayload,
+  commandTypeByArea,
+  groupCommandItems,
+  productionCommandTypes,
+  renderCommand,
+} from './production-command';
 
-const OPEN_STATUSES: OrderStatus[] = [
-  OrderStatus.DRAFT,
-  OrderStatus.SENT,
-  OrderStatus.IN_PROGRESS,
-  OrderStatus.READY,
-  OrderStatus.SERVED,
-];
+const commandJobSelect = {
+  id: true,
+  printerId: true,
+  orderId: true,
+  type: true,
+  status: true,
+} satisfies Prisma.PrintJobSelect;
+
+const editableCommandJobs = {
+  type: { in: productionCommandTypes },
+  OR: [
+    { status: PrintJobStatus.PENDING },
+    {
+      status: PrintJobStatus.FAILED,
+      error: { startsWith: retryablePrintErrorPrefix },
+    },
+  ],
+} satisfies Prisma.PrintJobWhereInput;
+
+const OPEN_STATUSES: OrderStatus[] = [OrderStatus.DRAFT, OrderStatus.SENT];
 
 const ORDER_SELECT = {
   id: true,
@@ -100,9 +128,6 @@ const ORDER_SELECT = {
       status: true,
       productionArea: true,
       sentAt: true,
-      preparingAt: true,
-      readyAt: true,
-      servedAt: true,
       cancelledAt: true,
       cancellationReason: true,
       createdAt: true,
@@ -185,39 +210,6 @@ export class OrdersService {
       { isolationLevel: 'Serializable' },
     );
     return this.findOne({ id: orderId });
-  }
-
-  async readyForService(userId: string) {
-    const orders = await this.db.order.findMany({
-      where: {
-        createdById: userId,
-        status: { in: OPEN_STATUSES },
-        items: { some: { status: OrderItemStatus.READY } },
-      },
-      orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
-      select: {
-        id: true,
-        number: true,
-        status: true,
-        tables: {
-          select: { table: { select: { id: true, number: true, name: true } } },
-        },
-        items: {
-          where: { status: OrderItemStatus.READY },
-          orderBy: [{ readyAt: 'asc' }, { id: 'asc' }],
-          select: {
-            id: true,
-            productNameSnapshot: true,
-            variantNameSnapshot: true,
-            quantity: true,
-          },
-        },
-      },
-    });
-    return orders.map(({ tables, ...order }) => ({
-      ...order,
-      tables: tables.map(({ table }) => table),
-    }));
   }
 
   async findAll(query: OrderQueryDto): Promise<PaginatedOrdersResponse> {
@@ -311,6 +303,33 @@ export class OrdersService {
     });
     if (!order) throw new NotFoundException('Pedido no encontrado');
     return this.toResponse(order);
+  }
+
+  async commandPrintJobs(params: OrderIdParamDto, user: AuthenticatedUser) {
+    const order = await this.db.order.findFirst({
+      where: {
+        id: params.id,
+        ...(user.userRole === UserRole.WAITER ? { createdById: user.id } : {}),
+      },
+      select: {
+        printJobs: {
+          where: { type: { in: productionCommandTypes } },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          select: { id: true, type: true, status: true, payload: true },
+        },
+      },
+    });
+    if (!order) throw new NotFoundException('Pedido no encontrado');
+    return order.printJobs.map(({ payload, ...job }) => ({
+      ...job,
+      roundNumber:
+        payload &&
+        typeof payload === 'object' &&
+        !Array.isArray(payload) &&
+        typeof payload.roundNumber === 'number'
+          ? payload.roundNumber
+          : null,
+    }));
   }
 
   async update(
@@ -516,102 +535,82 @@ export class OrdersService {
     dto: SendOrderDto,
     user: AuthenticatedUser,
   ): Promise<OrderDetailResponse> {
-    const sentIds = await this.db.$transaction(
-      async (tx) => {
-        const order = await tx.order.findUnique({
-          where: { id: params.id },
-          select: {
-            id: true,
-            number: true,
-            type: true,
-            status: true,
-            notes: true,
-            sentAt: true,
-            tables: { select: { tableId: true } },
-            items: {
-              where: { status: OrderItemStatus.DRAFT },
-              select: {
-                id: true,
-                productId: true,
-                productVariantId: true,
-                productNameSnapshot: true,
-                quantity: true,
-                notes: true,
-                productionArea: true,
-                modifiers: { select: { modifierOptionId: true } },
-                comboSelections: { select: { comboGroupItemId: true } },
-              },
-            },
+    const printJobs = await serializableTransaction(this.db, async (tx) => {
+      const order = await tx.order.findUnique({
+        where: { id: params.id },
+        select: {
+          ...ORDER_SELECT,
+          createdById: true,
+          items: {
+            ...ORDER_SELECT.items,
+            where: { status: OrderItemStatus.DRAFT },
           },
-        });
-        if (!order) throw new NotFoundException('Pedido no encontrado');
-        this.ensureOpenOrder(order.status);
-
-        if (order.items.length === 0) {
-          throw new BadRequestException('No hay productos nuevos para enviar');
-        }
-        this.validateTablesForType(
-          order.type,
-          order.tables.map(({ tableId }) => tableId),
-        );
-        await this.validateItemsAvailability(tx, order.items);
-        const now = new Date();
-        await tx.orderItem.updateMany({
-          where: {
-            id: { in: order.items.map((item) => item.id) },
-            status: OrderItemStatus.DRAFT,
-          },
-          data: { status: OrderItemStatus.PENDING, sentAt: now },
-        });
-        await tx.order.update({
-          where: { id: order.id },
-          data: {
-            status:
-              order.status === OrderStatus.IN_PROGRESS
-                ? OrderStatus.IN_PROGRESS
-                : OrderStatus.SENT,
-            sentAt: order.sentAt ?? now,
-            notes: dto.notes ?? order.notes,
-          },
-        });
-        if (order.tables.length) {
-          await tx.table.updateMany({
-            where: { id: { in: order.tables.map(({ tableId }) => tableId) } },
-            data: { status: TableStatus.OCCUPIED },
-          });
-        }
-        await this.createPrintJobs(tx, order, now);
-        await tx.auditLog.create({
-          data: {
-            userId: user.id,
-            action: AuditAction.UPDATE,
-            entity: 'Order',
-            entityId: order.id,
-            description: `Pedido #${order.number}: ${order.items.length} líneas nuevas enviadas a produccion`,
-          },
-        });
-        return order.items.map((item) => item.id);
-      },
-      { isolationLevel: 'Serializable' },
-    );
-    const response = await this.findOne(params);
-    this.printerWorkerEvents.notifyJobsAvailable();
-    this.operationsEvents.emitOrderSent(response);
-    const notifiedAreas = new Set<'KITCHEN' | 'BAR'>();
-    for (const item of response.items.filter((item) =>
-      sentIds.includes(item.id),
-    )) {
-      if (item.productionArea === ProductionAreaCode.KITCHEN) {
-        this.operationsEvents.emitKitchenItemCreated(item);
-        notifiedAreas.add('KITCHEN');
-      } else if (item.productionArea === ProductionAreaCode.BAR) {
-        this.operationsEvents.emitBarItemCreated(item);
-        notifiedAreas.add('BAR');
+        },
+      });
+      if (!order) throw new NotFoundException('Pedido no encontrado');
+      if (user.userRole === UserRole.WAITER && order.createdById !== user.id) {
+        throw new ForbiddenException('Solo puedes enviar tus propios pedidos');
       }
-    }
-    for (const area of notifiedAreas) {
-      this.operationsEvents.emitProductionBatchReceived(area, sentIds[0]);
-    }
+      this.ensureOpenOrder(order.status);
+
+      if (order.items.length === 0) {
+        throw new BadRequestException('No hay productos nuevos para enviar');
+      }
+      this.validateTablesForType(
+        order.type,
+        order.tables.map(({ table }) => table.id),
+      );
+      await this.validateItemsAvailability(tx, order.items);
+      const lastSend = await tx.orderItem.aggregate({
+        where: { orderId: order.id },
+        _max: { sentAt: true },
+      });
+      const now = new Date(
+        Math.max(Date.now(), (lastSend._max.sentAt?.getTime() ?? 0) + 1),
+      );
+      await tx.orderItem.updateMany({
+        where: {
+          id: { in: order.items.map((item) => item.id) },
+          status: OrderItemStatus.DRAFT,
+        },
+        data: { status: OrderItemStatus.SENT, sentAt: now },
+      });
+      await tx.order.update({
+        where: { id: order.id },
+        data: {
+          status: OrderStatus.SENT,
+          sentAt: order.sentAt ?? now,
+          notes: dto.notes ?? order.notes,
+        },
+      });
+      if (order.tables.length) {
+        await tx.table.updateMany({
+          where: { id: { in: order.tables.map(({ table }) => table.id) } },
+          data: { status: TableStatus.OCCUPIED },
+        });
+      }
+      const jobs = await this.createPrintJobs(
+        tx,
+        { ...order, notes: dto.notes ?? order.notes },
+        now,
+      );
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: AuditAction.UPDATE,
+          entity: 'Order',
+          entityId: order.id,
+          description: `Pedido #${order.number}: ${order.items.length} líneas nuevas enviadas a produccion`,
+        },
+      });
+      return jobs;
+    });
+    if (printJobs.length) this.printerWorkerEvents.notifyJobsAvailable();
+    const response = await this.findOne(params);
+    this.operationsEvents.emitOrderSent({
+      orderId: response.id,
+      status: response.status,
+    });
     for (const table of response.tables) {
       this.operationsEvents.emitTableStatusChanged({
         tableId: table.id,
@@ -619,21 +618,11 @@ export class OrdersService {
         orderId: response.id,
       });
     }
-    const printJobs = await this.db.printJob.findMany({
-      where: {
-        orderId: response.id,
-        items: { some: { orderItemId: { in: sentIds } } },
-      },
-      select: {
-        id: true,
-        printerId: true,
-        orderId: true,
-        type: true,
-        status: true,
-      },
-    });
     for (const printJob of printJobs) {
-      this.operationsEvents.emitPrintJobStatusChanged(printJob);
+      this.operationsEvents.emitPrintJobStatusChanged(
+        printJob,
+        response.createdBy?.id,
+      );
     }
     return response;
   }
@@ -643,88 +632,90 @@ export class OrdersService {
     dto: CancelOrderDto,
     user: AuthenticatedUser,
   ): Promise<OrderDetailResponse> {
-    await this.db.$transaction(
-      async (tx) => {
-        const order = await tx.order.findUnique({
-          where: { id: params.id },
-          select: {
-            number: true,
-            status: true,
-            createdById: true,
-            tables: { select: { tableId: true } },
-          },
-        });
-        if (!order) throw new NotFoundException('Pedido no encontrado');
-        if (user.userRole === UserRole.WAITER) {
-          if (order.createdById !== user.id) {
-            throw new ForbiddenException(
-              'Solo puedes cancelar tus propios borradores',
-            );
-          }
-          if (order.status !== OrderStatus.DRAFT) {
-            throw new ConflictException(
-              'Solo puedes cancelar pedidos que sigan en borrador',
-            );
-          }
+    const cancelledJobs = await serializableTransaction(this.db, async (tx) => {
+      const order = await tx.order.findUnique({
+        where: { id: params.id },
+        select: {
+          number: true,
+          status: true,
+          createdById: true,
+          tables: { select: { tableId: true } },
+        },
+      });
+      if (!order) throw new NotFoundException('Pedido no encontrado');
+      if (user.userRole === UserRole.WAITER) {
+        if (order.createdById !== user.id) {
+          throw new ForbiddenException(
+            'Solo puedes cancelar tus propios borradores',
+          );
         }
-        if (
-          order.status === OrderStatus.PAID ||
-          order.status === OrderStatus.CANCELLED
-        ) {
-          throw new ConflictException('El pedido ya esta cerrado');
+        if (order.status !== OrderStatus.DRAFT) {
+          throw new ConflictException(
+            'Solo puedes cancelar pedidos que sigan en borrador',
+          );
         }
-        await ensureOrderUnbilled(tx, params.id);
-        const now = new Date();
-        await tx.order.update({
-          where: { id: params.id },
-          data: {
-            status: OrderStatus.CANCELLED,
-            closedAt: now,
-            closedById: user.id,
-          },
-        });
-        await tx.orderItem.updateMany({
-          where: {
-            orderId: params.id,
-            status: { not: OrderItemStatus.CANCELLED },
-          },
-          data: {
-            status: OrderItemStatus.CANCELLED,
-            cancelledAt: now,
-            cancelledById: user.id,
-            cancellationReason: dto.reason,
-          },
-        });
-        await this.releaseTables(
-          tx,
-          order.tables.map(({ tableId }) => tableId),
-        );
-        await tx.auditLog.create({
-          data: {
-            userId: user.id,
-            action: AuditAction.CANCEL,
-            entity: 'Order',
-            entityId: params.id,
-            description: `Pedido #${order.number} cancelado: ${dto.reason}`,
-          },
-        });
-      },
-      { isolationLevel: 'Serializable' },
-    );
+      }
+      if (
+        order.status === OrderStatus.PAID ||
+        order.status === OrderStatus.CANCELLED
+      ) {
+        throw new ConflictException('El pedido ya esta cerrado');
+      }
+      await ensureOrderUnbilled(tx, params.id);
+      const now = new Date();
+      await tx.order.update({
+        where: { id: params.id },
+        data: {
+          status: OrderStatus.CANCELLED,
+          closedAt: now,
+          closedById: user.id,
+        },
+      });
+      await tx.orderItem.updateMany({
+        where: {
+          orderId: params.id,
+          status: { not: OrderItemStatus.CANCELLED },
+        },
+        data: {
+          status: OrderItemStatus.CANCELLED,
+          cancelledAt: now,
+          cancelledById: user.id,
+          cancellationReason: dto.reason,
+        },
+      });
+      await this.releaseTables(
+        tx,
+        order.tables.map(({ tableId }) => tableId),
+      );
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: AuditAction.CANCEL,
+          entity: 'Order',
+          entityId: params.id,
+          description: `Pedido #${order.number} cancelado: ${dto.reason}`,
+        },
+      });
+      if (order.status === OrderStatus.DRAFT) return [];
+      return tx.printJob.updateManyAndReturn({
+        where: { ...editableCommandJobs, orderId: params.id },
+        data: { status: PrintJobStatus.CANCELLED },
+        select: commandJobSelect,
+      });
+    });
     const response = await this.findOne(params);
+    for (const job of cancelledJobs) {
+      this.operationsEvents.emitPrintJobStatusChanged(
+        job,
+        response.createdBy?.id,
+      );
+    }
     this.operationsEvents.emitOrderStatusChanged({
       orderId: response.id,
       status: response.status,
     });
     for (const item of response.items) {
-      this.operationsEvents.emitOrderItemStatusChanged(
-        item,
-        item.productionArea === ProductionAreaCode.KITCHEN
-          ? 'KITCHEN'
-          : item.productionArea === ProductionAreaCode.BAR
-            ? 'BAR'
-            : undefined,
-      );
+      this.operationsEvents.emitOrderItemStatusChanged(item);
     }
     for (const table of response.tables) {
       this.operationsEvents.emitTableStatusChanged({
@@ -741,7 +732,8 @@ export class OrdersService {
     dto: CancelOrderItemDto,
     user: AuthenticatedUser,
   ): Promise<OrderDetailResponse> {
-    const cancelledItemId = await this.db.$transaction(
+    const { cancelledItemId, updatedJobs } = await serializableTransaction(
+      this.db,
       async (tx) => {
         const item = await tx.orderItem.findFirst({
           where: { id: params.itemId, orderId: params.id },
@@ -762,10 +754,7 @@ export class OrdersService {
         ) {
           throw new ConflictException('El pedido ya esta cerrado');
         }
-        if (
-          item.status === OrderItemStatus.CANCELLED ||
-          item.status === OrderItemStatus.SERVED
-        ) {
+        if (item.status === OrderItemStatus.CANCELLED) {
           throw new ConflictException('El item ya no puede cancelarse');
         }
         await ensureOrderUnbilled(tx, params.id);
@@ -816,8 +805,6 @@ export class OrdersService {
               notes: item.notes,
               productionArea: item.productionArea,
               sentAt: item.sentAt,
-              preparingAt: item.preparingAt,
-              readyAt: item.readyAt,
               createdById: item.createdById,
               status: OrderItemStatus.CANCELLED,
               cancelledAt,
@@ -858,22 +845,27 @@ export class OrdersService {
             description: `${quantity} de ${item.quantity} unidades de ${item.productNameSnapshot} canceladas (línea ${item.id}): ${dto.reason}`,
           },
         });
-        return cancelledItemId;
+        const updatedJobs = item.sentAt
+          ? await this.updateCommandsAfterItemCancellation(
+              tx,
+              params.id,
+              item.id,
+            )
+          : [];
+        return { cancelledItemId, updatedJobs };
       },
-      { isolationLevel: 'Serializable' },
     );
     const response = await this.findOne({ id: params.id });
+    for (const job of updatedJobs) {
+      this.operationsEvents.emitPrintJobStatusChanged(
+        job,
+        response.createdBy?.id,
+      );
+    }
     for (const item of response.items.filter(
       (item) => item.id === params.itemId || item.id === cancelledItemId,
     )) {
-      this.operationsEvents.emitOrderItemStatusChanged(
-        item,
-        item.productionArea === ProductionAreaCode.KITCHEN
-          ? 'KITCHEN'
-          : item.productionArea === ProductionAreaCode.BAR
-            ? 'BAR'
-            : undefined,
-      );
+      this.operationsEvents.emitOrderItemStatusChanged(item);
     }
     this.operationsEvents.emitOrderStatusChanged({
       orderId: response.id,
@@ -1275,96 +1267,151 @@ export class OrdersService {
 
   private async createPrintJobs(
     tx: Prisma.TransactionClient,
-    order: {
-      id: string;
-      number: number;
-      items: Array<{
-        id: string;
-        productNameSnapshot: string;
-        quantity: number;
-        notes: string | null;
-        productionArea: ProductionAreaCode;
-      }>;
-    },
+    order: OrderRecord,
     sentAt: Date,
-  ): Promise<void> {
+  ) {
+    const comboIds = [
+      ...new Set(
+        order.items.flatMap((item) =>
+          item.comboSelections.flatMap(({ comboGroupItemId }) =>
+            comboGroupItemId ? [comboGroupItemId] : [],
+          ),
+        ),
+      ),
+    ];
+    const componentAreas = new Map<string, ProductionAreaCode>();
+    if (comboIds.length) {
+      const options = await tx.comboGroupItem.findMany({
+        where: { id: { in: comboIds } },
+        select: { id: true, productId: true },
+      });
+      const components = await tx.product.findMany({
+        where: { id: { in: options.map(({ productId }) => productId) } },
+        select: {
+          id: true,
+          productionArea: { select: { code: true } },
+          category: { select: { productionArea: { select: { code: true } } } },
+        },
+      });
+      const areaByProduct = new Map(
+        components.map((product) => [
+          product.id,
+          product.productionArea?.code ??
+            product.category.productionArea?.code ??
+            ProductionAreaCode.NONE,
+        ]),
+      );
+      for (const option of options) {
+        const area = areaByProduct.get(option.productId);
+        if (area) componentAreas.set(option.id, area);
+      }
+    }
+
+    const groups = groupCommandItems(order.items, componentAreas);
+    const areas = (Object.keys(groups) as CommandArea[]).filter(
+      (area) => groups[area].length > 0,
+    );
+    if (!areas.length) return [];
+
+    const printers = await tx.printer.findMany({
+      where: { ...readyPrinter, purpose: PrinterPurpose.GENERAL },
+      select: { id: true },
+      take: 2,
+    });
+    if (printers.length !== 1) {
+      throw new ConflictException(
+        printers.length
+          ? 'Deja activa una sola impresora de comandas.'
+          : 'Configura una impresora de comandas activa con un agente activo antes de enviar el pedido.',
+      );
+    }
+
     const sends = await tx.orderItem.groupBy({
       by: ['orderId', 'sentAt'],
       where: { orderId: order.id, sentAt: { not: null } },
     });
-    const roundNumber = orderRoundNumbers(sends).get(
-      `${order.id}:${sentAt.toISOString()}`,
-    )!;
-    const sentTime = new Intl.DateTimeFormat('es-PE', {
-      timeZone: 'America/Lima',
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hourCycle: 'h23',
-    }).format(sentAt);
-    const areas = [...new Set(order.items.map((item) => item.productionArea))];
-    const printers = await tx.printer.findMany({
-      where: {
-        active: true,
-        status: PrinterStatus.ACTIVE,
-        OR: [
-          { purpose: PrinterPurpose.GENERAL },
-          { productionArea: { code: { in: areas } } },
+    const sentIso = sentAt.toISOString();
+    const roundNumber = orderRoundNumbers(sends).get(`${order.id}:${sentIso}`)!;
+    const sentTime = formatThermalTicketDate(sentAt);
+    const destination =
+      order.type === OrderType.DINE_IN
+        ? order.tables.map(
+            ({ table }) =>
+              `Mesa ${table.number}${table.name ? ` · ${table.name}` : ''} (${table.diningArea.name})`,
+          )
+        : [
+            `${order.type === OrderType.TAKEAWAY ? 'Para llevar' : 'Delivery'}${order.customerName ? ` · ${order.customerName}` : ''}`,
+          ];
+    const jobs: Prisma.PrintJobGetPayload<{
+      select: typeof commandJobSelect;
+    }>[] = [];
+    for (const area of areas) {
+      const commandItems = groups[area];
+      const payload = renderCommand({
+        productionArea: area,
+        orderNumber: order.number,
+        roundNumber,
+        sentAt: sentIso,
+        headerLines: 2,
+        header: [
+          commandAreaLabel[area],
+          `Pedido #${order.number}`,
+          `Ronda ${roundNumber}${roundNumber > 1 ? ' | Adicional' : ''}`,
+          `Enviada: ${sentTime}`,
+          ...destination,
+          ...(order.notes ? [`Nota del pedido: ${order.notes}`] : []),
         ],
-      },
-      select: {
-        id: true,
-        purpose: true,
-        productionArea: { select: { code: true } },
-      },
-    });
-    for (const printer of printers) {
-      const printerAreas =
-        printer.purpose === PrinterPurpose.GENERAL
-          ? areas.filter((area) => area !== ProductionAreaCode.NONE)
-          : printer.productionArea
-            ? [printer.productionArea.code]
-            : [];
-      for (const area of printerAreas) {
-        const items = order.items.filter(
-          (item) => item.productionArea === area,
-        );
-        if (!items.length) continue;
-        const type =
-          area === ProductionAreaCode.BAR
-            ? PrintJobType.BAR_COMMAND
-            : PrintJobType.KITCHEN_COMMAND;
+        commandItems,
+      });
+
+      jobs.push(
         await tx.printJob.create({
           data: {
-            printerId: printer.id,
+            documentKey: `command:${order.id}:${roundNumber}:${area}`,
+            printerId: printers[0].id,
             orderId: order.id,
-            type,
-            payload: {
-              orderNumber: order.number,
-              productionArea: area,
-              roundNumber,
-              sentAt: sentAt.toISOString(),
-              lines: [
-                `${area} | Pedido #${order.number}`,
-                `Ronda ${roundNumber}${roundNumber > 1 ? ' | Adicional' : ''}`,
-                `Enviada: ${sentTime} | Lima`,
-                ...items.flatMap((item) => [
-                  `${item.quantity} x ${item.productNameSnapshot}`,
-                  ...(item.notes ? ['  ' + item.notes] : []),
-                ]),
-              ],
-              items,
-            },
+            type: commandTypeByArea[area],
+            payload,
             items: {
-              create: items.map((item) => ({ orderItemId: item.id })),
+              create: commandItems.map(({ orderItemId }) => ({ orderItemId })),
             },
           },
-        });
-      }
+          select: commandJobSelect,
+        }),
+      );
     }
+    return jobs;
+  }
+
+  private async updateCommandsAfterItemCancellation(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+    itemId: string,
+  ) {
+    const jobs = await tx.printJob.findMany({
+      where: {
+        ...editableCommandJobs,
+        orderId,
+        items: { some: { orderItemId: itemId } },
+      },
+      select: commandContentsSelect,
+    });
+
+    const changed: Prisma.PrintJobGetPayload<{
+      select: typeof commandJobSelect;
+    }>[] = [];
+    for (const job of jobs) {
+      const payload = currentCommandPayload(job);
+
+      changed.push(
+        ...(await tx.printJob.updateManyAndReturn({
+          where: { ...editableCommandJobs, id: job.id },
+          data: payload ? { payload } : { status: PrintJobStatus.CANCELLED },
+          select: commandJobSelect,
+        })),
+      );
+    }
+    return changed;
   }
 
   private async validateTables(

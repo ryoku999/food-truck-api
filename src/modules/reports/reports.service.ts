@@ -104,7 +104,7 @@ export class ReportsService {
       this.db.order.count({
         where: {
           openedAt,
-          status: { in: ['SENT', 'IN_PROGRESS', 'READY', 'SERVED'] },
+          status: 'SENT',
         },
       }),
     ]);
