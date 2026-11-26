@@ -21,41 +21,12 @@ export class OperationsEventsService {
     this.emitToRoles(FRONT_OPERATION_ROLES, OPERATIONS_EVENTS.ORDER_SENT, data);
   }
 
-  emitKitchenItemCreated<T>(data: T): void {
-    this.emitToRooms(
-      ['area:KITCHEN'],
-      OPERATIONS_EVENTS.KITCHEN_ITEM_CREATED,
+  emitOrderItemStatusChanged<T>(data: T): void {
+    this.emitToRoles(
+      FRONT_OPERATION_ROLES,
+      OPERATIONS_EVENTS.ORDER_ITEM_STATUS_CHANGED,
       data,
     );
-  }
-
-  emitBarItemCreated<T>(data: T): void {
-    this.emitToRooms(['area:BAR'], OPERATIONS_EVENTS.BAR_ITEM_CREATED, data);
-  }
-
-  emitProductionBatchReceived(area: 'KITCHEN' | 'BAR', id: string): void {
-    this.emitToRooms(
-      [`area:${area}`],
-      OPERATIONS_EVENTS.PRODUCTION_BATCH_RECEIVED,
-      { id, area },
-    );
-  }
-
-  emitWaiterItemReady(
-    userId: string,
-    data: { id: string; orderId: string },
-  ): void {
-    this.emitToRooms(
-      [`user:${userId}`],
-      OPERATIONS_EVENTS.WAITER_ITEM_READY,
-      data,
-    );
-  }
-
-  emitOrderItemStatusChanged<T>(data: T, area?: 'KITCHEN' | 'BAR'): void {
-    const rooms = FRONT_OPERATION_ROLES.map((role) => `role:${role}`);
-    if (area) rooms.push(`area:${area}`);
-    this.emitToRooms(rooms, OPERATIONS_EVENTS.ORDER_ITEM_STATUS_CHANGED, data);
   }
 
   emitOrderStatusChanged<T>(data: T): void {
@@ -74,12 +45,12 @@ export class OperationsEventsService {
     );
   }
 
-  emitPrintJobStatusChanged<T>(data: T): void {
-    this.emitToRoles(
-      [UserRole.CASHIER, UserRole.ADMIN, UserRole.MANAGER],
-      OPERATIONS_EVENTS.PRINT_JOB_STATUS_CHANGED,
-      data,
+  emitPrintJobStatusChanged<T>(data: T, orderOwnerId?: string | null): void {
+    const rooms = [UserRole.CASHIER, UserRole.ADMIN, UserRole.MANAGER].map(
+      (role) => `role:${role}`,
     );
+    if (orderOwnerId) rooms.push(`user:${orderOwnerId}`);
+    this.emitToRooms(rooms, OPERATIONS_EVENTS.PRINT_JOB_STATUS_CHANGED, data);
   }
 
   private emitToRoles<T>(roles: UserRole[], event: string, data: T): void {

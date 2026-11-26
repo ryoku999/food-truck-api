@@ -57,6 +57,35 @@ $ pnpm run test:e2e
 $ pnpm run test:cov
 ```
 
+## Operación con comandas impresas
+
+Cocina y barra reciben sus comandas en una térmica compartida. El catálogo
+define el área de cada producto o categoría. Caja y el mozo trabajan con
+pedidos enviados mientras cocina y barra se coordinan de palabra.
+
+```sh
+pnpm exec prisma migrate deploy --config prisma7.config.ts
+pnpm exec prisma generate --config prisma7.config.ts
+pnpm run build
+```
+
+En una base nueva, define `BOOTSTRAP_ADMIN_USERNAME`, `BOOTSTRAP_ADMIN_DNI`,
+`BOOTSTRAP_ADMIN_FIRST_NAME` y `BOOTSTRAP_ADMIN_PASSWORD` en el entorno y
+ejecuta `pnpm run bootstrap:admin`. Si ya existe un administrador activo,
+el comando termina sin crear otro usuario. Retira la contraseña del entorno
+al terminar.
+
+Desde Administración, configura el negocio, mesas, catálogo, áreas de
+producción y caja. Registra un agente, instala el servicio Windows con su
+token y asigna una impresora activa de **Comandas de cocina y barra**
+(`GENERAL`) y una de **Caja** (`CASHIER`). Prueba ambas desde el panel.
+
+El mozo ve el estado de cada comanda en el pedido. Caja, gerencia y
+administración pueden recuperar un trabajo fallido desde la cola. Si el
+agente reportó un resultado incierto, comprueba que la comanda no salió antes
+de confirmar el reintento. Si una comanda pudo salir antes de una anulación,
+comunica el cambio al personal del área.
+
 ## Deployment
 
 When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.

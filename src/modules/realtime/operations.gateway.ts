@@ -76,20 +76,6 @@ export class OperationsGateway implements OnGatewayConnection {
 
       client.data.user = { id: user.id, userRole: user.userRole };
       await client.join([`user:${user.id}`, `role:${user.userRole}`]);
-      if (
-        user.userRole === UserRole.KITCHEN ||
-        user.userRole === UserRole.ADMIN ||
-        user.userRole === UserRole.MANAGER
-      ) {
-        await client.join('area:KITCHEN');
-      }
-      if (
-        user.userRole === UserRole.BAR ||
-        user.userRole === UserRole.ADMIN ||
-        user.userRole === UserRole.MANAGER
-      ) {
-        await client.join('area:BAR');
-      }
       client.emit('operations.ready', {
         occurredAt: new Date().toISOString(),
         data: { userRole: user.userRole },

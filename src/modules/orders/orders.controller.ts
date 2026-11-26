@@ -38,8 +38,6 @@ const OPERATIONAL_ROLES = [
   UserRole.MANAGER,
   UserRole.CASHIER,
   UserRole.WAITER,
-  UserRole.KITCHEN,
-  UserRole.BAR,
 ];
 
 @Controller('orders')
@@ -68,10 +66,13 @@ export class OrdersController {
     );
   }
 
-  @Get('ready-for-service')
-  @Auth(UserRole.WAITER)
-  readyForService(@CurrentUser() user: AuthenticatedUser) {
-    return this.ordersService.readyForService(user.id);
+  @Get(':id/command-print-jobs')
+  @Auth(...OPERATIONAL_ROLES)
+  commandPrintJobs(
+    @Param() params: OrderIdParamDto,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.ordersService.commandPrintJobs(params, user);
   }
 
   @Get(':id')

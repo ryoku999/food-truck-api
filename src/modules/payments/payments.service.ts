@@ -1,3 +1,4 @@
+import { serializableTransaction } from '@/database/serializable-transaction';
 import { DatabaseService } from '@/database/database.service';
 import { BillPartsService } from './bill-parts.service';
 import { Prisma } from '@/generated/prisma/client';
@@ -313,7 +314,8 @@ export class PaymentsService {
     dto: CancelPaymentDto,
     user: AuthenticatedUser,
   ): Promise<PaymentResponse> {
-    await this.db.$transaction(
+    await serializableTransaction(
+      this.db,
       async (tx) => {
         const payment = await tx.payment.findUnique({
           where: { id: params.id },
@@ -407,7 +409,7 @@ export class PaymentsService {
           await tx.order.update({
             where: { id: payment.order.id },
             data: {
-              status: OrderStatus.SERVED,
+              status: OrderStatus.SENT,
               paidAt: null,
               closedAt: null,
               closedById: null,
@@ -429,7 +431,6 @@ export class PaymentsService {
           },
         });
       },
-      { isolationLevel: 'Serializable' },
     );
     const response = await this.findOne(params.id);
     await this.emitOrderPaymentChanges(response);

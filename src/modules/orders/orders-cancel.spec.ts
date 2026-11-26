@@ -35,6 +35,7 @@ describe('OrdersService.cancel', () => {
         update: jest.fn(),
       },
       orderItem: { updateMany: jest.fn() },
+      printJob: { updateManyAndReturn: jest.fn().mockResolvedValue([]) },
       table: { updateMany: jest.fn() },
       auditLog: { create: jest.fn() },
     };
@@ -114,7 +115,7 @@ describe('OrdersService.cancel', () => {
   });
 
   it('allows the cashier to cancel a sent order', async () => {
-    const { service } = setup(OrderStatus.SENT);
+    const { service, tx } = setup(OrderStatus.SENT);
 
     await expect(
       service.cancel(params, dto, {
@@ -122,5 +123,14 @@ describe('OrdersService.cancel', () => {
         userRole: UserRole.CASHIER,
       }),
     ).resolves.toMatchObject({ status: OrderStatus.CANCELLED });
+    expect(tx.printJob.updateManyAndReturn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          orderId: params.id,
+          type: { in: ['KITCHEN_COMMAND', 'BAR_COMMAND'] },
+        }),
+        data: { status: 'CANCELLED' },
+      }),
+    );
   });
 });

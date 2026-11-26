@@ -62,6 +62,10 @@ export class PrintTicketDto {
   @IsOptional() @IsUUID() printerId?: string;
 }
 
+export class RetryPrintJobDto extends PrintTicketDto {
+  @IsOptional() @IsBoolean() confirmedMissingPaper?: boolean;
+}
+
 export class PartTicketParamsDto extends IdDto {
   @IsUUID() partId!: string;
 }

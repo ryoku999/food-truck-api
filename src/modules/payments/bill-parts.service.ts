@@ -1,3 +1,4 @@
+import { serializableTransaction } from '@/database/serializable-transaction';
 import { DatabaseService } from '@/database/database.service';
 import { Prisma } from '@/generated/prisma/client';
 import {
@@ -132,7 +133,8 @@ export class BillPartsService {
   }
 
   async remove(orderId: string, partId: string, userId: string) {
-    return this.db.$transaction(
+    return serializableTransaction(
+      this.db,
       async (tx) => {
         const order = await this.find(tx, orderId);
         this.ensureEditable(order);
@@ -171,7 +173,6 @@ export class BillPartsService {
         });
         return this.response(await this.find(tx, orderId));
       },
-      { isolationLevel: 'Serializable' },
     );
   }
 

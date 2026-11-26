@@ -23,9 +23,6 @@ import {
 const OPEN_ORDER_STATUSES: OrderStatus[] = [
   OrderStatus.DRAFT,
   OrderStatus.SENT,
-  OrderStatus.IN_PROGRESS,
-  OrderStatus.READY,
-  OrderStatus.SERVED,
 ];
 
 const TABLE_SELECT = {

@@ -28,6 +28,7 @@ import {
   PrintTicketDto,
   PrintPrebillDto,
   PartTicketParamsDto,
+  RetryPrintJobDto,
   TestPrinterDto,
 } from './printing.dto';
 import { PrintingService } from './printing.service';
@@ -120,10 +121,10 @@ class PrintingController {
   @Auth('CASHIER', 'ADMIN', 'MANAGER')
   retry(
     @Param() { id }: IdDto,
-    @Body() dto: PrintTicketDto,
+    @Body() dto: RetryPrintJobDto,
     @CurrentUser() user: AuthenticatedUser,
   ) {
-    return this.service.retry(id, user.id, dto?.printerId);
+    return this.service.retry(id, user.id, dto);
   }
 
   @Get('print-jobs/:id/retry-printers')
